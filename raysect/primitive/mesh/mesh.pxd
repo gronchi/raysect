@@ -58,6 +58,8 @@ cdef class MeshData(KDTree3DCore):
         float _sx, _sy, _sz
         float _u, _v, _w, _t
         int32_t _i
+        ndarray _tri_vertices
+        float32_t[:, ::1] tri_vertices_mv
 
     cpdef Point3D vertex(self, int index)
     cpdef ndarray triangle(self, int index)
@@ -96,7 +98,7 @@ cdef inline MeshIntersection new_mesh_intersection(
         AffineMatrix3D world_to_primitive, AffineMatrix3D primitive_to_world,
         int32_t triangle, float u, float v, float w):
 
-    cdef Intersection intersection
+    cdef MeshIntersection intersection
     intersection = MeshIntersection.__new__(MeshIntersection)
     intersection._construct(ray, ray_distance, primitive, hit_point, inside_point, outside_point, normal, exiting, world_to_primitive, primitive_to_world)
     intersection.triangle = triangle

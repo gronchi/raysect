@@ -34,8 +34,11 @@ import struct
 
 from numpy import array, float32, int32, zeros
 from raysect.core cimport Primitive, AffineMatrix3D, Normal3D, new_normal3d, Point3D, new_point3d, Vector3D, new_vector3d, Material, Ray, new_ray, Intersection, new_intersection, BoundingBox3D, new_boundingbox3d
+from raysect.core.boundingbox cimport _bbox_contains_inline, _bbox_intersect_inline
+from raysect.core.math.affinematrix cimport _mat4_is_identity
 from raysect.core.math.spatial cimport KDTree3DCore, Item3D
-from libc.math cimport fabs, INFINITY
+from raysect.core.math.spatial.kdtree3d cimport kdnode
+from libc.math cimport fabs, INFINITY, sqrt
 from numpy cimport float32_t, int32_t, uint8_t
 from cpython.bytes cimport PyBytes_AsString
 cimport cython
@@ -80,6 +83,320 @@ cdef enum:
     # raysect mesh format constants
     RSM_VERSION_MAJOR = 1
     RSM_VERSION_MINOR = 0
+
+cdef Vector3D _Z_AXIS = new_vector3d(0, 0, 1)
+
+
+@cython.cdivision(True)
+cdef inline void _calc_rayspace_transform_inline(MeshData self, Ray ray) noexcept nogil:
+
+    cdef:
+        int32_t ix, iy, iz
+        float rdz
+        float sx, sy, sz
+        double *d = &ray.direction.x
+
+    # to minimise numerical error cycle the direction components so the largest becomes the z-component
+    if fabs(d[X]) > fabs(d[Y]) and fabs(d[X]) > fabs(d[Z]):
+        ix, iy, iz = Y, Z, X
+    elif fabs(d[Y]) > fabs(d[X]) and fabs(d[Y]) > fabs(d[Z]):
+        ix, iy, iz = Z, X, Y
+    else:
+        ix, iy, iz = X, Y, Z
+
+    rdz = d[iz]
+    if rdz < 0.0:
+        ix, iy = iy, ix
+
+    sz = 1.0 / rdz
+    sx = d[ix] * sz
+    sy = d[iy] * sz
+
+    self._ix = ix
+    self._iy = iy
+    self._iz = iz
+
+    self._sx = sx
+    self._sy = sy
+    self._sz = sz
+
+
+@cython.cdivision(True)
+@cython.boundscheck(False)
+@cython.wraparound(False)
+@cython.initializedcheck(False)
+cdef inline bint _meshdata_trace_leaf_inline(MeshData self, int32_t id, Ray ray, double max_range) noexcept nogil:
+
+    cdef:
+        int32_t count, item
+        int32_t *items_ptr
+        float32_t *tri_vertices_ptr = &self.tri_vertices_mv[0, 0]
+        float32_t *tri_v
+        double distance, max_dist
+        double u, v, w, t
+        int32_t triangle, closest_triangle
+        int32_t ix, iy, iz
+        float sx, sy, sz
+        double o_ix, o_iy, o_iz
+        float v1_iz, v2_iz, v3_iz
+        float x1, x2, x3
+        float y1, y2, y3
+        float z1, z2, z3
+        float tu, tv, tw, tt, det, det_reciprocal
+
+    count = self._nodes[id].count
+    items_ptr = self._nodes[id].items
+
+    ix = self._ix
+    iy = self._iy
+    iz = self._iz
+
+    o_ix = (&ray.origin.x)[ix]
+    o_iy = (&ray.origin.x)[iy]
+    o_iz = (&ray.origin.x)[iz]
+
+    sx = self._sx
+    sy = self._sy
+    sz = self._sz
+
+    max_dist = ray.max_distance
+    distance = min(max_dist, max_range)
+    closest_triangle = NO_INTERSECTION
+    for item in range(count):
+
+        triangle = items_ptr[item]
+        tri_v = tri_vertices_ptr + <Py_ssize_t> triangle * 9
+
+        v1_iz = <float> (tri_v[iz] - o_iz)
+        v2_iz = <float> (tri_v[3 + iz] - o_iz)
+        v3_iz = <float> (tri_v[6 + iz] - o_iz)
+
+        x1 = <float> (tri_v[ix] - o_ix) - sx * v1_iz
+        x2 = <float> (tri_v[3 + ix] - o_ix) - sx * v2_iz
+        x3 = <float> (tri_v[6 + ix] - o_ix) - sx * v3_iz
+
+        y1 = <float> (tri_v[iy] - o_iy) - sy * v1_iz
+        y2 = <float> (tri_v[3 + iy] - o_iy) - sy * v2_iz
+        y3 = <float> (tri_v[6 + iy] - o_iy) - sy * v3_iz
+
+        tu = x3 * y2 - y3 * x2
+        tv = x1 * y3 - y1 * x3
+        tw = x2 * y1 - y2 * x1
+
+        if tu == 0.0 or tv == 0.0 or tw == 0.0:
+            tu = <float> (<double> x3 * <double> y2 - <double> y3 * <double> x2)
+            tv = <float> (<double> x1 * <double> y3 - <double> y1 * <double> x3)
+            tw = <float> (<double> x2 * <double> y1 - <double> y2 * <double> x1)
+
+        if (tu < 0.0 or tv < 0.0 or tw < 0.0) and (tu > 0.0 or tv > 0.0 or tw > 0.0):
+            continue
+
+        det = tu + tv + tw
+        if det == 0.0:
+            continue
+
+        z1 = sz * v1_iz
+        z2 = sz * v2_iz
+        z3 = sz * v3_iz
+        tt = tu * z1 + tv * z2 + tw * z3
+
+        if det > 0.0:
+            if tt < 0.0 or tt > max_dist * det:
+                continue
+        else:
+            if tt > 0.0 or tt < max_dist * det:
+                continue
+
+        det_reciprocal = 1.0 / det
+        t = <float> (tt * det_reciprocal)
+        if t < distance:
+            distance = t
+            closest_triangle = triangle
+            u = <float> (tu * det_reciprocal)
+            v = <float> (tv * det_reciprocal)
+            w = <float> (tw * det_reciprocal)
+
+    if closest_triangle == NO_INTERSECTION:
+        return False
+
+    self._u = u
+    self._v = v
+    self._w = w
+    self._t = distance
+    self._i = closest_triangle
+
+    return True
+
+
+@cython.cdivision(True)
+cdef bint _mesh_trace_node(MeshData self, int32_t id, Ray ray, double min_range, double max_range) noexcept nogil:
+
+    cdef:
+        kdnode *nodes = self._nodes
+        double *orig = &ray.origin.x
+        double *dir_val = &ray.direction.x
+        int32_t axis, lower_id, upper_id, near_id, far_id
+        double split, origin, direction, plane_distance
+
+    while nodes[id].type != -1:
+        axis = nodes[id].type
+        split = nodes[id].split
+        lower_id = id + 1
+        upper_id = nodes[id].count
+
+        origin = orig[axis]
+        direction = dir_val[axis]
+
+        if direction == 0.0:
+            if origin < split:
+                id = lower_id
+            else:
+                id = upper_id
+        else:
+            plane_distance = (split - origin) / direction
+
+            if origin < split or (origin == split and direction < 0.0):
+                near_id = lower_id
+                far_id = upper_id
+            else:
+                near_id = upper_id
+                far_id = lower_id
+
+            if plane_distance > max_range or plane_distance <= 0.0:
+                id = near_id
+            elif plane_distance < min_range:
+                id = far_id
+            else:
+                if _mesh_trace_node(self, near_id, ray, min_range, plane_distance):
+                    return True
+                id = far_id
+                min_range = plane_distance
+
+    return _meshdata_trace_leaf_inline(self, id, ray, max_range)
+
+
+@cython.cdivision(True)
+@cython.boundscheck(False)
+@cython.wraparound(False)
+@cython.initializedcheck(False)
+cdef bint _mesh_contains_trace_z(
+    MeshData self, int32_t id,
+    double ox, double oy, double oz,
+    double min_range, double max_range,
+    int32_t *hit_tri
+) noexcept nogil:
+
+    cdef:
+        kdnode *nodes = self._nodes
+        int32_t axis, lower_id, upper_id
+        double split, plane_distance
+        int32_t count, item, triangle, closest_triangle
+        int32_t *items_ptr
+        float32_t *tri_vertices_ptr = &self.tri_vertices_mv[0, 0]
+        float32_t *tri_v
+        double distance
+        float x1, x2, x3, y1, y2, y3, z1, z2, z3
+        float tu, tv, tw, tt, det, t
+
+    while nodes[id].type != -1:
+        axis = nodes[id].type
+        split = nodes[id].split
+        lower_id = id + 1
+        upper_id = nodes[id].count
+
+        if axis == 0:
+            id = lower_id if ox < split else upper_id
+        elif axis == 1:
+            id = lower_id if oy < split else upper_id
+        else:
+            plane_distance = split - oz
+            if oz < split:
+                if plane_distance > max_range or plane_distance <= 0.0:
+                    id = lower_id
+                elif plane_distance < min_range:
+                    id = upper_id
+                else:
+                    if _mesh_contains_trace_z(self, lower_id, ox, oy, oz, min_range, plane_distance, hit_tri):
+                        return True
+                    id = upper_id
+                    min_range = plane_distance
+            else:
+                if plane_distance > max_range or plane_distance <= 0.0:
+                    id = upper_id
+                elif plane_distance < min_range:
+                    id = lower_id
+                else:
+                    if _mesh_contains_trace_z(self, upper_id, ox, oy, oz, min_range, plane_distance, hit_tri):
+                        return True
+                    id = lower_id
+                    min_range = plane_distance
+
+    count = nodes[id].count
+    items_ptr = nodes[id].items
+    distance = max_range
+    closest_triangle = NO_INTERSECTION
+    for item in range(count):
+        triangle = items_ptr[item]
+        tri_v = tri_vertices_ptr + <Py_ssize_t> triangle * 9
+
+        x1 = <float> (tri_v[0] - ox)
+        y1 = <float> (tri_v[1] - oy)
+        x2 = <float> (tri_v[3] - ox)
+        y2 = <float> (tri_v[4] - oy)
+        x3 = <float> (tri_v[6] - ox)
+        y3 = <float> (tri_v[7] - oy)
+
+        tu = x3 * y2 - y3 * x2
+        tv = x1 * y3 - y1 * x3
+        tw = x2 * y1 - y2 * x1
+
+        if tu == 0.0 or tv == 0.0 or tw == 0.0:
+            tu = <float> (<double> x3 * <double> y2 - <double> y3 * <double> x2)
+            tv = <float> (<double> x1 * <double> y3 - <double> y1 * <double> x3)
+            tw = <float> (<double> x2 * <double> y1 - <double> y2 * <double> x1)
+
+        if (tu < 0.0 or tv < 0.0 or tw < 0.0) and (tu > 0.0 or tv > 0.0 or tw > 0.0):
+            continue
+
+        det = tu + tv + tw
+        if det == 0.0:
+            continue
+
+        z1 = <float> (tri_v[2] - oz)
+        z2 = <float> (tri_v[5] - oz)
+        z3 = <float> (tri_v[8] - oz)
+        tt = tu * z1 + tv * z2 + tw * z3
+
+        if det > 0.0:
+            if tt < 0.0:
+                continue
+        else:
+            if tt > 0.0:
+                continue
+
+        t = <float> (tt * (1.0 / det))
+        if t < distance:
+            distance = t
+            closest_triangle = triangle
+
+    if closest_triangle == NO_INTERSECTION:
+        return False
+
+    hit_tri[0] = closest_triangle
+    return True
+
+
+cdef inline bint _meshdata_trace_inline(MeshData self, Ray ray) noexcept nogil:
+    cdef double min_range, max_range
+    self._u = -1.0
+    self._v = -1.0
+    self._w = -1.0
+    self._t = INFINITY
+    self._i = NO_INTERSECTION
+    _calc_rayspace_transform_inline(self, ray)
+    if not _bbox_intersect_inline(self.bounds, ray, &min_range, &max_range):
+        return False
+    return _mesh_trace_node(self, 0, ray, min_range, max_range)
 
 
 cdef class MeshIntersection(Intersection):
@@ -422,44 +739,73 @@ cdef class MeshData(KDTree3DCore):
                 self.vertex_normals_mv[i, Y] = -self.vertex_normals_mv[i, Y]
                 self.vertex_normals_mv[i, Z] = -self.vertex_normals_mv[i, Z]
 
+    @cython.cdivision(True)
     @cython.boundscheck(False)
     @cython.wraparound(False)
     @cython.initializedcheck(False)
     cdef object _generate_face_normals(self):
         """
-        Calculate the triangles face normals from the vertices.
-
-        The triangle face normal direction is defined by the right hand screw
-        rule. When looking at the triangle from the back face, the vertices
-        will be ordered in a clockwise fashion and the normal will be pointing
-        away from the observer.
+        Calculate the triangles face normals from the vertices and populate
+        contiguous pre-packed triangle vertex coordinates.
         """
 
         cdef:
-            int32_t i
+            int32_t i, num_tris
             int32_t i1, i2, i3
-            Point3D p1, p2, p3
-            Vector3D v1, v2, v3
+            double v1x, v1y, v1z, v2x, v2y, v2z, v3x, v3y, v3z
+            double e1x, e1y, e1z, e2x, e2y, e2z, nx, ny, nz, length
 
-        self._face_normals = zeros((self.triangles_mv.shape[0], 3), dtype=float32)
+        num_tris = self.triangles_mv.shape[0]
+        self._face_normals = zeros((num_tris, 3), dtype=float32)
         self.face_normals_mv = self._face_normals
-        for i in range(self.face_normals_mv.shape[0]):
+        self._tri_vertices = zeros((num_tris, 9), dtype=float32)
+        self.tri_vertices_mv = self._tri_vertices
+
+        for i in range(num_tris):
 
             i1 = self.triangles_mv[i, V1]
             i2 = self.triangles_mv[i, V2]
             i3 = self.triangles_mv[i, V3]
 
-            p1 = new_point3d(self.vertices_mv[i1, X], self.vertices_mv[i1, Y], self.vertices_mv[i1, Z])
-            p2 = new_point3d(self.vertices_mv[i2, X], self.vertices_mv[i2, Y], self.vertices_mv[i2, Z])
-            p3 = new_point3d(self.vertices_mv[i3, X], self.vertices_mv[i3, Y], self.vertices_mv[i3, Z])
+            v1x = self.vertices_mv[i1, X]
+            v1y = self.vertices_mv[i1, Y]
+            v1z = self.vertices_mv[i1, Z]
 
-            v1 = p1.vector_to(p2)
-            v2 = p1.vector_to(p3)
-            v3 = v1.cross(v2).normalise()
+            v2x = self.vertices_mv[i2, X]
+            v2y = self.vertices_mv[i2, Y]
+            v2z = self.vertices_mv[i2, Z]
 
-            self.face_normals_mv[i, X] = v3.x
-            self.face_normals_mv[i, Y] = v3.y
-            self.face_normals_mv[i, Z] = v3.z
+            v3x = self.vertices_mv[i3, X]
+            v3y = self.vertices_mv[i3, Y]
+            v3z = self.vertices_mv[i3, Z]
+
+            self.tri_vertices_mv[i, 0] = <float32_t> v1x
+            self.tri_vertices_mv[i, 1] = <float32_t> v1y
+            self.tri_vertices_mv[i, 2] = <float32_t> v1z
+            self.tri_vertices_mv[i, 3] = <float32_t> v2x
+            self.tri_vertices_mv[i, 4] = <float32_t> v2y
+            self.tri_vertices_mv[i, 5] = <float32_t> v2z
+            self.tri_vertices_mv[i, 6] = <float32_t> v3x
+            self.tri_vertices_mv[i, 7] = <float32_t> v3y
+            self.tri_vertices_mv[i, 8] = <float32_t> v3z
+
+            e1x = v2x - v1x
+            e1y = v2y - v1y
+            e1z = v2z - v1z
+
+            e2x = v3x - v1x
+            e2y = v3y - v1y
+            e2z = v3z - v1z
+
+            nx = e1y * e2z - e1z * e2y
+            ny = e1z * e2x - e1x * e2z
+            nz = e1x * e2y - e1y * e2x
+            length = sqrt(nx * nx + ny * ny + nz * nz)
+            if length != 0.0:
+                length = 1.0 / length
+                self.face_normals_mv[i, X] = <float32_t> (nx * length)
+                self.face_normals_mv[i, Y] = <float32_t> (ny * length)
+                self.face_normals_mv[i, Z] = <float32_t> (nz * length)
 
     @cython.boundscheck(False)
     @cython.wraparound(False)
@@ -504,110 +850,18 @@ cdef class MeshData(KDTree3DCore):
         return bbox
 
     cpdef bint trace(self, Ray ray):
+        return _meshdata_trace_inline(self, ray)
 
-        # reset hit data
-        self._u = -1.0
-        self._v = -1.0
-        self._w = -1.0
-        self._t = INFINITY
-        self._i = NO_INTERSECTION
-
-        self._calc_rayspace_transform(ray)
-        return self._trace(ray)
-
+    @cython.cdivision(True)
     @cython.boundscheck(False)
     @cython.wraparound(False)
+    @cython.initializedcheck(False)
     cdef bint _trace_leaf(self, int32_t id, Ray ray, double max_range):
-
-        cdef:
-            float hit_data[4]
-            int32_t count, item, index
-            double distance
-            double u, v, w, t
-            int32_t triangle, closest_triangle
-
-        # unpack leaf data
-        count = self._nodes[id].count
-
-        # find the closest triangle-ray intersection with initial search distance limited by node and ray limits
-        # closest_triangle is initialised with an illegal value so a non-intersection can be detected
-        distance = min(ray.max_distance, max_range)
-        closest_triangle = NO_INTERSECTION
-        for item in range(count):
-
-            # dereference the triangle
-            triangle = self._nodes[id].items[item]
-
-            # test for intersection
-            if self._hit_triangle(triangle, ray, hit_data):
-
-                t = hit_data[T]
-                if t < distance:
-
-                    distance = t
-                    closest_triangle = triangle
-                    u = hit_data[U]
-                    v = hit_data[V]
-                    w = hit_data[W]
-
-        if closest_triangle == NO_INTERSECTION:
-            return False
-
-        # update intersection data
-        self._u = u
-        self._v = v
-        self._w = w
-        self._t = distance
-        self._i = closest_triangle
-
-        return True
+        return _meshdata_trace_leaf_inline(self, id, ray, max_range)
 
     @cython.cdivision(True)
     cdef void _calc_rayspace_transform(self, Ray ray):
-
-        # This code is a Python port of the code listed in appendix A of
-        #  "Watertight Ray/Triangle Intersection", S.Woop, C.Benthin, I.Wald,
-        #  Journal of Computer Graphics Techniques (2013), Vol.2, No. 1
-
-        cdef:
-            int32_t ix, iy, iz
-            float rdz
-            float sx, sy, sz
-
-        # to minimise numerical error cycle the direction components so the largest becomes the z-component
-        if fabs(ray.direction.x) > fabs(ray.direction.y) and fabs(ray.direction.x) > fabs(ray.direction.z):
-
-            # x dimension largest
-            ix, iy, iz = Y, Z, X
-
-        elif fabs(ray.direction.y) > fabs(ray.direction.x) and fabs(ray.direction.y) > fabs(ray.direction.z):
-
-            # y dimension largest
-            ix, iy, iz = Z, X, Y
-
-        else:
-
-            # z dimension largest
-            ix, iy, iz = X, Y, Z
-
-        # if the z component is negative, swap x and y to restore the handedness of the space
-        rdz = ray.direction.get_index(iz)
-        if rdz < 0.0:
-            ix, iy = iy, ix
-
-        # calculate shear transform
-        sz = 1.0 / rdz
-        sx = ray.direction.get_index(ix) * sz
-        sy = ray.direction.get_index(iy) * sz
-
-        # store ray transform
-        self._ix = ix
-        self._iy = iy
-        self._iz = iz
-
-        self._sx = sx
-        self._sy = sy
-        self._sz = sz
+        _calc_rayspace_transform_inline(self, ray)
 
     @cython.cdivision(True)
     @cython.boundscheck(False)
@@ -718,10 +972,10 @@ cdef class MeshData(KDTree3DCore):
     cpdef Intersection calc_intersection(self, Ray ray):
 
         cdef:
-            double t
+            double t, fnx, fny, fnz
             int32_t triangle
             Point3D hit_point, inside_point, outside_point
-            Normal3D face_normal, normal
+            Normal3D normal
             bint exiting
 
         # on a hit the kd-tree populates attributes containing the intersection data
@@ -732,28 +986,26 @@ cdef class MeshData(KDTree3DCore):
             return None
 
         # generate intersection description
-        face_normal = new_normal3d(
-            self.face_normals_mv[triangle, X],
-            self.face_normals_mv[triangle, Y],
-            self.face_normals_mv[triangle, Z]
-        )
+        fnx = self.face_normals_mv[triangle, X]
+        fny = self.face_normals_mv[triangle, Y]
+        fnz = self.face_normals_mv[triangle, Z]
         hit_point = new_point3d(
             ray.origin.x + ray.direction.x * t,
             ray.origin.y + ray.direction.y * t,
             ray.origin.z + ray.direction.z * t
         )
         inside_point = new_point3d(
-            hit_point.x - face_normal.x * EPSILON,
-            hit_point.y - face_normal.y * EPSILON,
-            hit_point.z - face_normal.z * EPSILON
+            hit_point.x - fnx * EPSILON,
+            hit_point.y - fny * EPSILON,
+            hit_point.z - fnz * EPSILON
         )
         outside_point = new_point3d(
-            hit_point.x + face_normal.x * EPSILON,
-            hit_point.y + face_normal.y * EPSILON,
-            hit_point.z + face_normal.z * EPSILON
+            hit_point.x + fnx * EPSILON,
+            hit_point.y + fny * EPSILON,
+            hit_point.z + fnz * EPSILON
         )
         normal = self._intersection_normal()
-        exiting = ray.direction.dot(face_normal) > 0.0
+        exiting = (ray.direction.x * fnx + ray.direction.y * fny + ray.direction.z * fnz) > 0.0
 
         return new_mesh_intersection(
             ray, t, None,
@@ -766,6 +1018,7 @@ cdef class MeshData(KDTree3DCore):
     @cython.boundscheck(False)
     @cython.wraparound(False)
     @cython.initializedcheck(False)
+    @cython.cdivision(True)
     cdef Normal3D _intersection_normal(self):
         """
         Returns the surface normal for the last triangle hit.
@@ -778,6 +1031,7 @@ cdef class MeshData(KDTree3DCore):
         """
 
         cdef int32_t n1, n2, n3
+        cdef double nx, ny, nz, length
 
         if self.smoothing and self.vertex_normals_mv is not None:
 
@@ -785,19 +1039,21 @@ cdef class MeshData(KDTree3DCore):
             n2 = self.triangles_mv[self._i, N2]
             n3 = self.triangles_mv[self._i, N3]
 
-            return new_normal3d(
-                self._u * self.vertex_normals_mv[n1, X] + self._v * self.vertex_normals_mv[n2, X] + self._w * self.vertex_normals_mv[n3, X],
-                self._u * self.vertex_normals_mv[n1, Y] + self._v * self.vertex_normals_mv[n2, Y] + self._w * self.vertex_normals_mv[n3, Y],
-                self._u * self.vertex_normals_mv[n1, Z] + self._v * self.vertex_normals_mv[n2, Z] + self._w * self.vertex_normals_mv[n3, Z]
-            ).normalise()
+            nx = self._u * self.vertex_normals_mv[n1, X] + self._v * self.vertex_normals_mv[n2, X] + self._w * self.vertex_normals_mv[n3, X]
+            ny = self._u * self.vertex_normals_mv[n1, Y] + self._v * self.vertex_normals_mv[n2, Y] + self._w * self.vertex_normals_mv[n3, Y]
+            nz = self._u * self.vertex_normals_mv[n1, Z] + self._v * self.vertex_normals_mv[n2, Z] + self._w * self.vertex_normals_mv[n3, Z]
 
         else:
 
-            return new_normal3d(
-                self.face_normals_mv[self._i, X],
-                self.face_normals_mv[self._i, Y],
-                self.face_normals_mv[self._i, Z]
-            ).normalise()
+            nx = self.face_normals_mv[self._i, X]
+            ny = self.face_normals_mv[self._i, Y]
+            nz = self.face_normals_mv[self._i, Z]
+
+        length = nx * nx + ny * ny + nz * nz
+        if length != 0.0:
+            length = 1.0 / sqrt(length)
+            return new_normal3d(nx * length, ny * length, nz * length)
+        return new_normal3d(nx, ny, nz).normalise()
 
     @cython.boundscheck(False)
     @cython.wraparound(False)
@@ -814,20 +1070,20 @@ cdef class MeshData(KDTree3DCore):
         :return: True if mesh contains point, False otherwise.
         """
 
-        cdef Ray ray
+        cdef int32_t hit_tri
+
+        if not _bbox_contains_inline(self.bounds, p):
+            return False
 
         # fire ray along z axis, if it encounters a polygon it inspects the orientation of the face
         # if the face is outwards, then the ray was spawned inside the mesh
         # this assumes the mesh has all face normals facing outwards from the mesh interior
-        ray = new_ray(p, new_vector3d(0, 0, 1), INFINITY)
-
-        # search for closest triangle intersection
-        if not self.trace(ray):
+        if not _mesh_contains_trace_z(self, 0, p.x, p.y, p.z, 0.0, self.bounds.upper.z - p.z, &hit_tri):
             return False
 
         # inspect the Z component of the triangle face normal to identify orientation
         # this is an optimised version of ray.direction.dot(face_normal) as we know ray only propagating in Z
-        return self.face_normals_mv[self._i, Z] > 0.0
+        return self.face_normals_mv[hit_tri, Z] > 0.0
 
     @cython.boundscheck(False)
     @cython.wraparound(False)
@@ -1192,17 +1448,20 @@ cdef class Mesh(Primitive):
 
         cdef Ray local_ray
 
-        local_ray = new_ray(
-            ray.origin.transform(self.to_local()),
-            ray.direction.transform(self.to_local()),
-            ray.max_distance
-        )
+        if _mat4_is_identity(self._root_transform_inverse):
+            local_ray = ray
+        else:
+            local_ray = new_ray(
+                ray.origin.transform(self._root_transform_inverse),
+                ray.direction.transform(self._root_transform_inverse),
+                ray.max_distance
+            )
 
         # reset accumulated ray distance (used by next_intersection)
         self._ray_distance = 0
 
         # do we hit the mesh?
-        if self.data.trace(local_ray):
+        if _meshdata_trace_inline(self.data, local_ray):
             return self._process_intersection(ray, local_ray)
 
         # there was no intersection so disable next intersection search
@@ -1229,7 +1488,7 @@ cdef class Mesh(Primitive):
         if self._seek_next_intersection:
 
             # do we hit the mesh again?
-            if self.data.trace(self._next_local_ray):
+            if _meshdata_trace_inline(self.data, self._next_local_ray):
                 return self._process_intersection(self._next_world_ray, self._next_local_ray)
 
             # there was no intersection so disable further searching
@@ -1269,8 +1528,8 @@ cdef class Mesh(Primitive):
         # fill in missing intersection information
         intersection.primitive = self
         intersection.ray = world_ray
-        intersection.world_to_primitive = self.to_local()
-        intersection.primitive_to_world = self.to_root()
+        intersection.world_to_primitive = self._root_transform_inverse
+        intersection.primitive_to_world = self._root_transform
 
         return intersection
 
@@ -1291,7 +1550,8 @@ cdef class Mesh(Primitive):
         if not self.data.closed:
             return False
 
-        p = p.transform(self.to_local())
+        if not _mat4_is_identity(self._root_transform_inverse):
+            p = p.transform(self._root_transform_inverse)
         return self.data.contains(p)
 
     cpdef BoundingBox3D bounding_box(self):
