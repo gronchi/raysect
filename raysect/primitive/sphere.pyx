@@ -30,8 +30,11 @@
 # POSSIBILITY OF SUCH DAMAGE.
 
 
-from raysect.core cimport Material, new_intersection, BoundingBox3D, BoundingSphere3D, new_point3d, new_normal3d, Normal3D, AffineMatrix3D
+from raysect.core cimport Material, new_intersection, BoundingBox3D, BoundingSphere3D, new_point3d, new_vector3d, new_normal3d, Normal3D, AffineMatrix3D
+from raysect.core.math.affinematrix cimport _transform_ray_inline
 from raysect.core.math.cython cimport solve_quadratic, swap_double
+from libc.math cimport sqrt
+cimport cython
 
 
 # bounding box and sphere are padded by small amounts to avoid numerical accuracy issues
@@ -40,6 +43,45 @@ cdef const double SPHERE_PADDING = 1.000000001
 
 # additional ray distance to avoid re-hitting the same surface point
 cdef const double EPSILON = 1e-9
+
+
+@cython.cdivision(True)
+cdef inline Intersection _generate_sphere_intersection_inline(
+    Sphere self, Ray ray,
+    double ox, double oy, double oz,
+    double dx, double dy, double dz,
+    double ray_distance
+):
+    cdef Point3D hit_point, inside_point, outside_point
+    cdef Normal3D normal
+    cdef double hx, hy, hz, nx, ny, nz, delta_x, delta_y, delta_z, n_len
+    cdef bint exiting
+
+    hx = ox + ray_distance * dx
+    hy = oy + ray_distance * dy
+    hz = oz + ray_distance * dz
+    hit_point = new_point3d(hx, hy, hz)
+
+    n_len = hx * hx + hy * hy + hz * hz
+    if n_len == 0.0:
+        raise ZeroDivisionError("A zero length vector cannot be normalised as the direction of a zero length vector is undefined.")
+    n_len = 1.0 / sqrt(n_len)
+    nx = hx * n_len
+    ny = hy * n_len
+    nz = hz * n_len
+    normal = new_normal3d(nx, ny, nz)
+
+    delta_x = EPSILON * nx
+    delta_y = EPSILON * ny
+    delta_z = EPSILON * nz
+
+    inside_point = new_point3d(hx - delta_x, hy - delta_y, hz - delta_z)
+    outside_point = new_point3d(hx + delta_x, hy + delta_y, hz + delta_z)
+
+    exiting = (dx * nx + dy * ny + dz * nz) >= 0.0
+
+    return new_intersection(ray, ray_distance, self, hit_point, inside_point, outside_point,
+                            normal, exiting, self._root_transform_inverse, self._root_transform)
 
 
 cdef class Sphere(Primitive):
@@ -114,21 +156,24 @@ cdef class Sphere(Primitive):
 
     cpdef Intersection hit(self, Ray ray):
 
-        cdef Point3D origin
-        cdef Vector3D direction
+        cdef double ox, oy, oz, dx, dy, dz
         cdef double a, b, c, t0, t1, t_closest
 
         # reset further intersection state
         self._further_intersection = False
 
-        # convert ray parameters to local space
-        origin = ray.origin.transform(self.to_local())
-        direction = ray.direction.transform(self.to_local())
+        # convert ray parameters to local space in C registers
+        _transform_ray_inline(
+            ray.origin.x, ray.origin.y, ray.origin.z,
+            ray.direction.x, ray.direction.y, ray.direction.z,
+            self._root_transform_inverse,
+            &ox, &oy, &oz, &dx, &dy, &dz
+        )
 
         # coefficients of quadratic equation and discriminant
-        a = direction.x * direction.x + direction.y * direction.y + direction.z * direction.z
-        b = 2 * (direction.x * origin.x + direction.y * origin.y + direction.z * origin.z)
-        c = origin.x * origin.x + origin.y * origin.y + origin.z * origin.z - self._radius * self._radius
+        a = dx * dx + dy * dy + dz * dz
+        b = 2 * (dx * ox + dy * oy + dz * oz)
+        c = ox * ox + oy * oy + oz * oz - self._radius * self._radius
 
         # calculate intersection distances by solving the quadratic equation
         # ray misses if there are no real roots of the quadratic
@@ -148,15 +193,23 @@ cdef class Sphere(Primitive):
             if t1 <= ray.max_distance:
                 self._further_intersection = True
                 self._cached_ray = ray
-                self._cached_origin = origin
-                self._cached_direction = direction
+                if self._cached_origin is None:
+                    self._cached_origin = new_point3d(ox, oy, oz)
+                    self._cached_direction = new_vector3d(dx, dy, dz)
+                else:
+                    self._cached_origin.x = ox
+                    self._cached_origin.y = oy
+                    self._cached_origin.z = oz
+                    self._cached_direction.x = dx
+                    self._cached_direction.y = dy
+                    self._cached_direction.z = dz
                 self._next_t = t1
         elif t1 <= ray.max_distance:
             t_closest = t1
         else:
             return None
 
-        return self._generate_intersection(ray, origin, direction, t_closest)
+        return _generate_sphere_intersection_inline(self, ray, ox, oy, oz, dx, dy, dz, t_closest)
 
     cpdef Intersection next_intersection(self):
 
@@ -165,54 +218,39 @@ cdef class Sphere(Primitive):
 
         # this is the 2nd and therefore last intersection
         self._further_intersection = False
-        return self._generate_intersection(self._cached_ray, self._cached_origin, self._cached_direction, self._next_t)
+        return _generate_sphere_intersection_inline(
+            self, self._cached_ray,
+            self._cached_origin.x, self._cached_origin.y, self._cached_origin.z,
+            self._cached_direction.x, self._cached_direction.y, self._cached_direction.z,
+            self._next_t
+        )
 
+    @cython.cdivision(True)
     cdef Intersection _generate_intersection(self, Ray ray, Point3D origin, Vector3D direction, double ray_distance):
+        return _generate_sphere_intersection_inline(self, ray, origin.x, origin.y, origin.z, direction.x, direction.y, direction.z, ray_distance)
 
-        cdef Point3D hit_point, inside_point, outside_point
-        cdef Normal3D normal
-        cdef double delta_x, delta_y, delta_z
-        cdef bint exiting
-
-        # point of surface intersection in local space
-        hit_point = new_point3d(origin.x + ray_distance * direction.x,
-                                origin.y + ray_distance * direction.y,
-                                origin.z + ray_distance * direction.z)
-
-        # normal is normalised vector from sphere origin to hit_point
-        normal = new_normal3d(hit_point.x, hit_point.y, hit_point.z)
-        normal = normal.normalise()
-
-        # calculate points inside and outside of surface for daughter rays to
-        # spawn from - these points are displaced from the surface to avoid
-        # re-hitting the same surface
-        delta_x = EPSILON * normal.x
-        delta_y = EPSILON * normal.y
-        delta_z = EPSILON * normal.z
-
-        inside_point = new_point3d(hit_point.x - delta_x, hit_point.y - delta_y, hit_point.z - delta_z)
-        outside_point = new_point3d(hit_point.x + delta_x, hit_point.y + delta_y, hit_point.z + delta_z)
-
-        # is ray exiting surface
-        exiting = direction.dot(normal) >= 0.0
-
-        return new_intersection(ray, ray_distance, self, hit_point, inside_point, outside_point,
-                                normal, exiting, self.to_local(), self.to_root())
-
+    @cython.cdivision(True)
     cpdef bint contains(self, Point3D point) except -1:
 
-        cdef Point3D local_point
-        cdef double distance_sqr
+        cdef AffineMatrix3D m = self._root_transform_inverse
+        cdef double px = point.x, py = point.y, pz = point.z
+        cdef double x, y, z, w
 
-        # convert world space point to local space
-        local_point = point.transform(self.to_local())
-
-        # calculate squared distance of the point from the sphere origin
-        distance_sqr = (local_point.x * local_point.x + local_point.y * local_point.y + local_point.z * local_point.z)
+        x = m.m[0][0] * px + m.m[0][1] * py + m.m[0][2] * pz + m.m[0][3]
+        y = m.m[1][0] * px + m.m[1][1] * py + m.m[1][2] * pz + m.m[1][3]
+        z = m.m[2][0] * px + m.m[2][1] * py + m.m[2][2] * pz + m.m[2][3]
+        w = m.m[3][0] * px + m.m[3][1] * py + m.m[3][2] * pz + m.m[3][3]
+        if w != 1.0:
+            if w == 0.0:
+                raise ZeroDivisionError("Bad matrix transform, 4th element of homogeneous coordinate is zero.")
+            w = 1.0 / w
+            x *= w
+            y *= w
+            z *= w
 
         # point is outside sphere if point distance is greater than the radius
         # compare squares to avoid costly square root calculation
-        return distance_sqr <= self._radius * self._radius
+        return (x * x + y * y + z * z) <= self._radius * self._radius
 
     cpdef BoundingBox3D bounding_box(self):
 

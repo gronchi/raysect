@@ -29,7 +29,8 @@
 # ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
 
-from raysect.core cimport new_point3d, Point3D, new_normal3d, AffineMatrix3D, Material, new_intersection, BoundingBox3D
+from raysect.core cimport new_point3d, new_vector3d, Point3D, new_normal3d, AffineMatrix3D, Material, new_intersection, BoundingBox3D
+from raysect.core.math.affinematrix cimport _transform_ray_inline
 from raysect.core.math.cython cimport solve_quadratic, swap_double, swap_int
 from libc.math cimport sqrt, INFINITY
 cimport cython
@@ -155,8 +156,8 @@ cdef class Cone(Primitive):
         self._further_intersection = False
 
         # convert ray origin and direction to local space
-        origin = ray.origin.transform(self.to_local())
-        direction = ray.direction.transform(self.to_local())
+        origin = ray.origin.transform(self._root_transform_inverse)
+        direction = ray.direction.transform(self._root_transform_inverse)
 
         radius = self._radius
         height = self._height
@@ -318,7 +319,7 @@ cdef class Cone(Primitive):
 
         return new_intersection(
             ray, ray_distance, self, hit_point, inside_point, outside_point,
-            normal, exiting, self.to_local(), self.to_root()
+            normal, exiting, self._root_transform_inverse, self._root_transform
         )
 
     @cython.cdivision(True)

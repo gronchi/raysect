@@ -144,7 +144,7 @@ cdef class Parabola(Primitive):
             Point3D origin
             Vector3D direction
             double radius, height
-            double a, b, c, k, t0, t1, t0_z, t1_z
+            double a, b, c, k, t0, t1, t0_z, t1_z, r2
             int t0_type, t1_type
             bint t0_outside, t1_outside
             double closest_intersection
@@ -154,8 +154,8 @@ cdef class Parabola(Primitive):
         self._further_intersection = False
 
         # convert ray origin and direction to local space
-        origin = ray.origin.transform(self.to_local())
-        direction = ray.direction.transform(self.to_local())
+        origin = ray.origin.transform(self._root_transform_inverse)
+        direction = ray.direction.transform(self._root_transform_inverse)
 
         radius = self._radius
         height = self._height
@@ -308,7 +308,7 @@ cdef class Parabola(Primitive):
         exiting = direction.dot(normal) >= 0.0
 
         return new_intersection(ray, ray_distance, self, hit_point, inside_point, outside_point,
-                                normal, exiting, self.to_local(), self.to_root())
+                                normal, exiting, self._root_transform_inverse, self._root_transform)
 
     @cython.cdivision(True)
     cdef Point3D _interior_point(self, Point3D hit_point, Normal3D normal, int type):

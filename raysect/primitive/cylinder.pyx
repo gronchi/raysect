@@ -30,6 +30,7 @@
 # POSSIBILITY OF SUCH DAMAGE.
 
 from raysect.core cimport AffineMatrix3D, new_normal3d, new_point3d, new_vector3d, Material, new_intersection, BoundingBox3D
+from raysect.core.math.affinematrix cimport _transform_ray_inline
 from raysect.core.math.cython cimport solve_quadratic, swap_double
 from libc.math cimport sqrt, fabs, INFINITY
 cimport cython
@@ -51,6 +52,64 @@ cdef enum:
     NO_FACE = -1
     LOWER_FACE = 0
     UPPER_FACE = 1
+
+
+@cython.cdivision(True)
+cdef inline Intersection _generate_cylinder_intersection_inline(
+    Cylinder self, Ray ray,
+    double ox, double oy, double oz,
+    double dx, double dy, double dz,
+    double ray_distance, int face, int type
+):
+    cdef Point3D hit_point, inside_point, outside_point
+    cdef Normal3D normal
+    cdef double hx, hy, hz, nx, ny, nz, ix, iy, iz, length
+    cdef bint exiting
+
+    hx = ox + ray_distance * dx
+    hy = oy + ray_distance * dy
+    hz = oz + ray_distance * dz
+    hit_point = new_point3d(hx, hy, hz)
+
+    if type == CYLINDER:
+        length = hx * hx + hy * hy
+        if length == 0.0:
+            raise ZeroDivisionError("A zero length vector cannot be normalised as the direction of a zero length vector is undefined.")
+        length = 1.0 / sqrt(length)
+        nx = hx * length
+        ny = hy * length
+        nz = 0.0
+        ix = -EPSILON * nx
+        iy = -EPSILON * ny
+    else:
+        nx = 0.0
+        ny = 0.0
+        nz = -1.0 if face == LOWER_FACE else 1.0
+        ix = 0.0
+        iy = 0.0
+        if hx != 0.0 and hy != 0.0:
+            length = sqrt(hx * hx + hy * hy)
+            if (length - self._radius) < EPSILON:
+                length = 1.0 / length
+                ix = -EPSILON * length * hx
+                iy = -EPSILON * length * hy
+
+    normal = new_normal3d(nx, ny, nz)
+
+    if fabs(hz) < EPSILON:
+        iz = EPSILON
+    elif fabs(hz - self._height) < EPSILON:
+        iz = -EPSILON
+    else:
+        iz = 0.0
+
+    inside_point = new_point3d(hx + ix, hy + iy, hz + iz)
+    outside_point = new_point3d(hx + EPSILON * nx, hy + EPSILON * ny, hz + EPSILON * nz)
+
+    exiting = (dx * nx + dy * ny + dz * nz) >= 0.0
+
+    return new_intersection(ray, ray_distance, self, hit_point, inside_point, outside_point,
+                            normal, exiting, self._root_transform_inverse, self._root_transform)
 
 
 cdef class Cylinder(Primitive):
@@ -148,24 +207,29 @@ cdef class Cylinder(Primitive):
     cpdef Intersection hit(self, Ray ray):
 
         cdef:
+            double ox, oy, oz, dx, dy, dz
             double near_intersection, far_intersection, closest_intersection
             int near_face, far_face, closest_face
             int near_type, far_type, closest_type
-            double a, b, c, t0, t1
+            double a, b, c, t0, t1, temp
             int f0, f1
 
         # reset the next intersection cache
         self._further_intersection = False
 
-        # convert ray origin and direction to local space
-        origin = ray.origin.transform(self.to_local())
-        direction = ray.direction.transform(self.to_local())
+        # convert ray origin and direction to local space in C registers
+        _transform_ray_inline(
+            ray.origin.x, ray.origin.y, ray.origin.z,
+            ray.direction.x, ray.direction.y, ray.direction.z,
+            self._root_transform_inverse,
+            &ox, &oy, &oz, &dx, &dy, &dz
+        )
 
         # check ray intersects infinite cylinder and obtain intersections
         # is ray parallel to cylinder surface?
-        if direction.x == 0 and direction.y == 0:
+        if dx == 0.0 and dy == 0.0:
 
-            if self._inside_cylinder(origin):
+            if (ox * ox + oy * oy) <= (self._radius * self._radius):
 
                 near_intersection = -INFINITY
                 near_type = NO_TYPE
@@ -183,9 +247,9 @@ cdef class Cylinder(Primitive):
         else:
 
             # coefficients of quadratic equation
-            a = direction.x * direction.x + direction.y * direction.y
-            b = 2.0 * (direction.x * origin.x + direction.y * origin.y)
-            c = origin.x * origin.x + origin.y * origin.y - self._radius * self._radius
+            a = dx * dx + dy * dy
+            b = 2.0 * (dx * ox + dy * oy)
+            c = ox * ox + oy * oy - self._radius * self._radius
 
             # calculate intersection distances by solving the quadratic equation
             # ray misses if there are no real roots of the quadratic
@@ -207,16 +271,16 @@ cdef class Cylinder(Primitive):
 
         # union slab with the cylinder
         # slab contributes no intersections if the ray is parallel to the slab surfaces
-        if direction.z != 0.0:
+        if dz != 0.0:
 
             # calculate intersections with slab planes
-            temp = 1.0 / direction.z
+            temp = 1.0 / dz
 
-            if direction.z > 0:
+            if dz > 0:
 
                 # calculate length along ray path of intersections
-                t0 = -origin.z * temp
-                t1 = (self._height - origin.z) * temp
+                t0 = -oz * temp
+                t1 = (self._height - oz) * temp
 
                 f0 = LOWER_FACE
                 f1 = UPPER_FACE
@@ -224,8 +288,8 @@ cdef class Cylinder(Primitive):
             else:
 
                 # calculate length along ray path of intersections
-                t0 = (self._height - origin.z) * temp
-                t1 = -origin.z * temp
+                t0 = (self._height - oz) * temp
+                t1 = -oz * temp
 
                 f0 = UPPER_FACE
                 f1 = LOWER_FACE
@@ -260,8 +324,16 @@ cdef class Cylinder(Primitive):
             if far_intersection <= ray.max_distance:
                 self._further_intersection = True
                 self._next_t = far_intersection
-                self._cached_origin = origin
-                self._cached_direction = direction
+                if self._cached_origin is None:
+                    self._cached_origin = new_point3d(ox, oy, oz)
+                    self._cached_direction = new_vector3d(dx, dy, dz)
+                else:
+                    self._cached_origin.x = ox
+                    self._cached_origin.y = oy
+                    self._cached_origin.z = oz
+                    self._cached_direction.x = dx
+                    self._cached_direction.y = dy
+                    self._cached_direction.z = dz
                 self._cached_ray = ray
                 self._cached_face = far_face
                 self._cached_type = far_type
@@ -273,7 +345,7 @@ cdef class Cylinder(Primitive):
         else:
             return None
 
-        return self._generate_intersection(ray, origin, direction, closest_intersection, closest_face, closest_type)
+        return _generate_cylinder_intersection_inline(self, ray, ox, oy, oz, dx, dy, dz, closest_intersection, closest_face, closest_type)
 
     cpdef Intersection next_intersection(self):
 
@@ -282,47 +354,15 @@ cdef class Cylinder(Primitive):
 
         # this is the 2nd and therefore last intersection
         self._further_intersection = False
-        return self._generate_intersection(self._cached_ray, self._cached_origin, self._cached_direction, self._next_t, self._cached_face, self._cached_type)
+        return _generate_cylinder_intersection_inline(
+            self, self._cached_ray,
+            self._cached_origin.x, self._cached_origin.y, self._cached_origin.z,
+            self._cached_direction.x, self._cached_direction.y, self._cached_direction.z,
+            self._next_t, self._cached_face, self._cached_type
+        )
 
     cdef Intersection _generate_intersection(self, Ray ray, Point3D origin, Vector3D direction, double ray_distance, int face, int type):
-
-        cdef:
-            Point3D hit_point, inside_point, outside_point
-            Vector3D interior_offset
-            Normal3D normal
-            bint exiting
-
-        # point of surface intersection in local space
-        hit_point = new_point3d(origin.x + ray_distance * direction.x,
-                                origin.y + ray_distance * direction.y,
-                                origin.z + ray_distance * direction.z)
-
-        # calculate surface normal in local space
-        if type == CYLINDER:
-            normal = new_normal3d(hit_point.x, hit_point.y, 0)
-            normal = normal.normalise()
-        else:
-            if face == LOWER_FACE:
-                normal = new_normal3d(0, 0, -1)
-            else:
-                normal = new_normal3d(0, 0, 1)
-
-        # displace hit_point away from surface to generate inner and outer points
-        interior_offset = self._interior_offset(hit_point, normal, type)
-
-        inside_point = new_point3d(hit_point.x + interior_offset.x,
-                                   hit_point.y + interior_offset.y,
-                                   hit_point.z + interior_offset.z)
-
-        outside_point = new_point3d(hit_point.x + EPSILON * normal.x,
-                                    hit_point.y + EPSILON * normal.y,
-                                    hit_point.z + EPSILON * normal.z)
-
-        # is ray exiting surface
-        exiting = direction.dot(normal) >= 0.0
-
-        return new_intersection(ray, ray_distance, self, hit_point, inside_point, outside_point,
-                                normal, exiting, self.to_local(), self.to_root())
+        return _generate_cylinder_intersection_inline(self, ray, origin.x, origin.y, origin.z, direction.x, direction.y, direction.z, ray_distance, face, type)
 
     @cython.cdivision(True)
     cdef Vector3D _interior_offset(self, Point3D hit_point, Normal3D normal, int type):
@@ -353,11 +393,31 @@ cdef class Cylinder(Primitive):
 
         return new_vector3d(x, y, z)
 
+    @cython.cdivision(True)
     cpdef bint contains(self, Point3D point) except -1:
 
-        # convert point to local object space
-        point = point.transform(self.to_local())
-        return self._inside_slab(point) and self._inside_cylinder(point)
+        cdef AffineMatrix3D m = self._root_transform_inverse
+        cdef double px = point.x, py = point.y, pz = point.z
+        cdef double x, y, z, w
+
+        w = m.m[3][0] * px + m.m[3][1] * py + m.m[3][2] * pz + m.m[3][3]
+        if w == 1.0:
+            z = m.m[2][0] * px + m.m[2][1] * py + m.m[2][2] * pz + m.m[2][3]
+            if z < 0.0 or z > self._height:
+                return False
+            x = m.m[0][0] * px + m.m[0][1] * py + m.m[0][2] * pz + m.m[0][3]
+            y = m.m[1][0] * px + m.m[1][1] * py + m.m[1][2] * pz + m.m[1][3]
+            return (x * x + y * y) <= (self._radius * self._radius)
+
+        if w == 0.0:
+            raise ZeroDivisionError("Bad matrix transform, 4th element of homogeneous coordinate is zero.")
+        w = 1.0 / w
+        z = (m.m[2][0] * px + m.m[2][1] * py + m.m[2][2] * pz + m.m[2][3]) * w
+        if z < 0.0 or z > self._height:
+            return False
+        x = (m.m[0][0] * px + m.m[0][1] * py + m.m[0][2] * pz + m.m[0][3]) * w
+        y = (m.m[1][0] * px + m.m[1][1] * py + m.m[1][2] * pz + m.m[1][3]) * w
+        return (x * x + y * y) <= (self._radius * self._radius)
 
     cdef bint _inside_cylinder(self, Point3D point):
 

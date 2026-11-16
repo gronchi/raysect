@@ -34,6 +34,7 @@
 from libc.math cimport INFINITY
 
 from raysect.core cimport _NodeBase, ChangeSignal, Material, new_ray, new_intersection, Point3D, AffineMatrix3D, BoundingBox3D
+from raysect.core.math.affinematrix cimport _mat4_is_identity
 
 # bounding box is padded by a small amount to avoid numerical accuracy issues
 cdef const double BOX_PADDING = 1e-9
@@ -138,10 +139,16 @@ cdef class CSGPrimitive(Primitive):
         # invalidate next_intersection cache
         self._cache_invalid = True
 
-        # convert ray to local space
-        local_ray = new_ray(ray.origin.transform(self.to_local()),
-                            ray.direction.transform(self.to_local()),
-                            INFINITY)
+        # convert ray to local space (fast-path when transform is identity)
+        if _mat4_is_identity(self._root_transform_inverse):
+            if ray.max_distance == INFINITY:
+                local_ray = ray
+            else:
+                local_ray = new_ray(ray.origin, ray.direction, INFINITY)
+        else:
+            local_ray = new_ray(ray.origin.transform(self._root_transform_inverse),
+                                ray.direction.transform(self._root_transform_inverse),
+                                INFINITY)
 
         # obtain initial intersections
         intersection_a = self._primitive_a.hit(local_ray)
@@ -199,12 +206,13 @@ cdef class CSGPrimitive(Primitive):
 
                     # convert local intersection attributes to csg primitive coordinate space
                     intersection.ray = ray
-                    intersection.hit_point = intersection.hit_point.transform(intersection.primitive_to_world)
-                    intersection.inside_point = intersection.inside_point.transform(intersection.primitive_to_world)
-                    intersection.outside_point = intersection.outside_point.transform(intersection.primitive_to_world)
-                    intersection.normal = intersection.normal.transform(intersection.primitive_to_world)
-                    intersection.world_to_primitive = self.to_local()
-                    intersection.primitive_to_world = self.to_root()
+                    if not _mat4_is_identity(intersection.primitive_to_world):
+                        intersection.hit_point = intersection.hit_point.transform(intersection.primitive_to_world)
+                        intersection.inside_point = intersection.inside_point.transform(intersection.primitive_to_world)
+                        intersection.outside_point = intersection.outside_point.transform(intersection.primitive_to_world)
+                        intersection.normal = intersection.normal.transform_with_inverse(intersection.world_to_primitive)
+                    intersection.world_to_primitive = self._root_transform_inverse
+                    intersection.primitive_to_world = self._root_transform
                     intersection.primitive = self
 
                     return intersection
@@ -349,7 +357,8 @@ cdef class Union(CSGPrimitive):
 
     cpdef bint contains(self, Point3D p) except -1:
 
-        p = p.transform(self.to_local())
+        if not _mat4_is_identity(self._root_transform_inverse):
+            p = p.transform(self._root_transform_inverse)
         return self._primitive_a.contains(p) or self._primitive_b.contains(p)
 
     cpdef BoundingBox3D bounding_box(self):
@@ -447,7 +456,8 @@ cdef class Intersect(CSGPrimitive):
 
     cpdef bint contains(self, Point3D p) except -1:
 
-        p = p.transform(self.to_local())
+        if not _mat4_is_identity(self._root_transform_inverse):
+            p = p.transform(self._root_transform_inverse)
         return self._primitive_a.contains(p) and self._primitive_b.contains(p)
 
     cpdef BoundingBox3D bounding_box(self):
@@ -549,27 +559,23 @@ cdef class Subtract(CSGPrimitive):
 
     cdef Intersection _modify_intersection(self, Intersection closest, Intersection a, Intersection b):
 
+        cdef Point3D temp_point
+
         if closest is b:
 
             # invert exiting/entering state, normal and swap inside and outside points
-            return new_intersection(
-                ray=closest.ray,
-                ray_distance=closest.ray_distance,
-                primitive=closest.primitive,
-                hit_point=closest.hit_point,
-                inside_point=closest.outside_point,
-                outside_point=closest.inside_point,
-                normal=closest.normal.neg(),
-                exiting=not closest.exiting,
-                world_to_primitive=closest.world_to_primitive,
-                primitive_to_world=closest.primitive_to_world
-            )
+            temp_point = closest.inside_point
+            closest.inside_point = closest.outside_point
+            closest.outside_point = temp_point
+            closest.normal = closest.normal.neg()
+            closest.exiting = not closest.exiting
 
         return closest
 
     cpdef bint contains(self, Point3D p) except -1:
 
-        p = p.transform(self.to_local())
+        if not _mat4_is_identity(self._root_transform_inverse):
+            p = p.transform(self._root_transform_inverse)
         return self._primitive_a.contains(p) and not self._primitive_b.contains(p)
 
     cpdef BoundingBox3D bounding_box(self):
