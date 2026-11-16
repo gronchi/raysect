@@ -29,8 +29,11 @@
 # ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 # POSSIBILITY OF SUCH DAMAGE.
 
+cimport cython
+from libc.math cimport sqrt, fabs
 from raysect.core.math.random cimport probability
-from raysect.optical cimport new_affinematrix3d
+from raysect.core.math.affinematrix cimport _mat4_is_identity
+from raysect.optical cimport new_affinematrix3d, new_vector3d
 
 
 cdef class Material(CoreMaterial):
@@ -230,32 +233,41 @@ cdef class DiscreteBSDF(Material):
         cdef:
             Vector3D w_outgoing, s_incoming
             Point3D w_reflection_origin, w_transmission_origin
-            AffineMatrix3D world_to_surface, surface_to_world, primitive_to_surface, surface_to_primitive
+            AffineMatrix3D world_to_surface, surface_to_world
 
         # surface space is aligned relative to the incoming ray
         # define ray launch points and orient normal appropriately
         if exiting:
 
             # ray incident on back face
-            w_reflection_origin = p_inside_point.transform(primitive_to_world)
-            w_transmission_origin = p_outside_point.transform(primitive_to_world)
-
-            # flip normal
-            p_normal = p_normal.neg()
+            if _mat4_is_identity(primitive_to_world):
+                w_reflection_origin = p_inside_point
+                w_transmission_origin = p_outside_point
+            else:
+                w_reflection_origin = p_inside_point.transform(primitive_to_world)
+                w_transmission_origin = p_outside_point.transform(primitive_to_world)
 
         else:
 
             # ray incident on front face
-            w_reflection_origin = p_outside_point.transform(primitive_to_world)
-            w_transmission_origin = p_inside_point.transform(primitive_to_world)
+            if _mat4_is_identity(primitive_to_world):
+                w_reflection_origin = p_outside_point
+                w_transmission_origin = p_inside_point
+            else:
+                w_reflection_origin = p_outside_point.transform(primitive_to_world)
+                w_transmission_origin = p_inside_point.transform(primitive_to_world)
 
         # obtain surface space transforms
-        primitive_to_surface, surface_to_primitive = _generate_surface_transforms(p_normal)
-        world_to_surface = primitive_to_surface.mul(world_to_primitive)
-        surface_to_world = primitive_to_world.mul(surface_to_primitive)
+        world_to_surface = AffineMatrix3D.__new__(AffineMatrix3D)
+        surface_to_world = AffineMatrix3D.__new__(AffineMatrix3D)
+        _populate_world_surface_transforms(p_normal, exiting, world_to_primitive, primitive_to_world, world_to_surface, surface_to_world)
 
         # convert ray direction to surface space incident direction
-        s_incoming = ray.direction.transform(world_to_surface).neg()
+        s_incoming = new_vector3d(
+            -(world_to_surface.m[0][0] * ray.direction.x + world_to_surface.m[0][1] * ray.direction.y + world_to_surface.m[0][2] * ray.direction.z),
+            -(world_to_surface.m[1][0] * ray.direction.x + world_to_surface.m[1][1] * ray.direction.y + world_to_surface.m[1][2] * ray.direction.z),
+            -(world_to_surface.m[2][0] * ray.direction.x + world_to_surface.m[2][1] * ray.direction.y + world_to_surface.m[2][2] * ray.direction.z)
+        )
 
         # bsdf sampling
         return self.evaluate_shading(world, ray, s_incoming, w_reflection_origin, w_transmission_origin, exiting, world_to_surface, surface_to_world, intersection)
@@ -294,39 +306,52 @@ cdef class ContinuousBSDF(Material):
                                     Intersection intersection):
 
         cdef:
-            double pdf, pdf_importance, pdf_bsdf
+            double pdf, pdf_important, pdf_bsdf
             Vector3D w_outgoing, s_incoming, s_outgoing
             Point3D w_hit_point, w_reflection_origin, w_transmission_origin
-            AffineMatrix3D world_to_surface, surface_to_world, primitive_to_surface, surface_to_primitive
+            AffineMatrix3D world_to_surface, surface_to_world
+            Spectrum spectrum
 
         # surface space is aligned relative to the incoming ray
         # define ray launch points and orient normal appropriately
         if exiting:
 
             # ray incident on back face
-            w_reflection_origin = p_inside_point.transform(primitive_to_world)
-            w_transmission_origin = p_outside_point.transform(primitive_to_world)
-
-            # flip normal
-            p_normal = p_normal.neg()
+            if _mat4_is_identity(primitive_to_world):
+                w_reflection_origin = p_inside_point
+                w_transmission_origin = p_outside_point
+            else:
+                w_reflection_origin = p_inside_point.transform(primitive_to_world)
+                w_transmission_origin = p_outside_point.transform(primitive_to_world)
 
         else:
 
             # ray incident on front face
-            w_reflection_origin = p_outside_point.transform(primitive_to_world)
-            w_transmission_origin = p_inside_point.transform(primitive_to_world)
+            if _mat4_is_identity(primitive_to_world):
+                w_reflection_origin = p_outside_point
+                w_transmission_origin = p_inside_point
+            else:
+                w_reflection_origin = p_outside_point.transform(primitive_to_world)
+                w_transmission_origin = p_inside_point.transform(primitive_to_world)
 
         # obtain surface space transforms
-        primitive_to_surface, surface_to_primitive = _generate_surface_transforms(p_normal)
-        world_to_surface = primitive_to_surface.mul(world_to_primitive)
-        surface_to_world = primitive_to_world.mul(surface_to_primitive)
+        world_to_surface = AffineMatrix3D.__new__(AffineMatrix3D)
+        surface_to_world = AffineMatrix3D.__new__(AffineMatrix3D)
+        _populate_world_surface_transforms(p_normal, exiting, world_to_primitive, primitive_to_world, world_to_surface, surface_to_world)
 
         # convert ray direction to surface space incident direction
-        s_incoming = ray.direction.transform(world_to_surface).neg()
+        s_incoming = new_vector3d(
+            -(world_to_surface.m[0][0] * ray.direction.x + world_to_surface.m[0][1] * ray.direction.y + world_to_surface.m[0][2] * ray.direction.z),
+            -(world_to_surface.m[1][0] * ray.direction.x + world_to_surface.m[1][1] * ray.direction.y + world_to_surface.m[1][2] * ray.direction.z),
+            -(world_to_surface.m[2][0] * ray.direction.x + world_to_surface.m[2][1] * ray.direction.y + world_to_surface.m[2][2] * ray.direction.z)
+        )
 
         if ray.importance_sampling and world.has_important_primitives():
 
-            w_hit_point = p_hit_point.transform(primitive_to_world)
+            if _mat4_is_identity(primitive_to_world):
+                w_hit_point = p_hit_point
+            else:
+                w_hit_point = p_hit_point.transform(primitive_to_world)
 
             # multiple importance sampling
             if probability(ray.get_important_path_weight()):
@@ -388,6 +413,96 @@ cdef class ContinuousBSDF(Material):
         """
 
         raise NotImplementedError("This ContinuousBSDF material has not implemented the bsdf() method.")
+
+
+@cython.cdivision(True)
+cdef inline void _populate_world_surface_transforms(
+    Normal3D normal,
+    bint flip_normal,
+    AffineMatrix3D w2p,
+    AffineMatrix3D p2w,
+    AffineMatrix3D w2s,
+    AffineMatrix3D s2w
+):
+    cdef double t, nx, ny, nz, tx, ty, tz, bx, by, bz
+
+    if flip_normal:
+        nx = -normal.x
+        ny = -normal.y
+        nz = -normal.z
+    else:
+        nx = normal.x
+        ny = normal.y
+        nz = normal.z
+
+    t = nx * nx + ny * ny + nz * nz
+    if t == 0.0:
+        raise ZeroDivisionError("A zero length vector can not be normalised as the direction of a zero length vector is undefined.")
+    t = 1.0 / sqrt(t)
+    tx = nx * t
+    ty = ny * t
+    tz = nz * t
+
+    if fabs(tx) <= 0.5:
+        bx = 1.0 - tx * tx
+        by = -tx * ty
+        bz = -tx * tz
+    else:
+        bx = -ty * tx
+        by = 1.0 - ty * ty
+        bz = -ty * tz
+
+    t = 1.0 / sqrt(bx * bx + by * by + bz * bz)
+    tx = bx * t
+    ty = by * t
+    tz = bz * t
+
+    # bitangent = normal x tangent
+    bx = ny * tz - ty * nz
+    by = nz * tx - tz * nx
+    bz = nx * ty - tx * ny
+
+    # world_to_surface = primitive_to_surface * w2p
+    w2s.m[0][0] = tx * w2p.m[0][0] + ty * w2p.m[1][0] + tz * w2p.m[2][0]
+    w2s.m[0][1] = tx * w2p.m[0][1] + ty * w2p.m[1][1] + tz * w2p.m[2][1]
+    w2s.m[0][2] = tx * w2p.m[0][2] + ty * w2p.m[1][2] + tz * w2p.m[2][2]
+    w2s.m[0][3] = tx * w2p.m[0][3] + ty * w2p.m[1][3] + tz * w2p.m[2][3]
+
+    w2s.m[1][0] = bx * w2p.m[0][0] + by * w2p.m[1][0] + bz * w2p.m[2][0]
+    w2s.m[1][1] = bx * w2p.m[0][1] + by * w2p.m[1][1] + bz * w2p.m[2][1]
+    w2s.m[1][2] = bx * w2p.m[0][2] + by * w2p.m[1][2] + bz * w2p.m[2][2]
+    w2s.m[1][3] = bx * w2p.m[0][3] + by * w2p.m[1][3] + bz * w2p.m[2][3]
+
+    w2s.m[2][0] = nx * w2p.m[0][0] + ny * w2p.m[1][0] + nz * w2p.m[2][0]
+    w2s.m[2][1] = nx * w2p.m[0][1] + ny * w2p.m[1][1] + nz * w2p.m[2][1]
+    w2s.m[2][2] = nx * w2p.m[0][2] + ny * w2p.m[1][2] + nz * w2p.m[2][2]
+    w2s.m[2][3] = nx * w2p.m[0][3] + ny * w2p.m[1][3] + nz * w2p.m[2][3]
+
+    w2s.m[3][0] = w2p.m[3][0]
+    w2s.m[3][1] = w2p.m[3][1]
+    w2s.m[3][2] = w2p.m[3][2]
+    w2s.m[3][3] = w2p.m[3][3]
+
+    # surface_to_world = p2w * surface_to_primitive
+    s2w.m[0][0] = p2w.m[0][0] * tx + p2w.m[0][1] * ty + p2w.m[0][2] * tz
+    s2w.m[0][1] = p2w.m[0][0] * bx + p2w.m[0][1] * by + p2w.m[0][2] * bz
+    s2w.m[0][2] = p2w.m[0][0] * nx + p2w.m[0][1] * ny + p2w.m[0][2] * nz
+    s2w.m[0][3] = p2w.m[0][3]
+
+    s2w.m[1][0] = p2w.m[1][0] * tx + p2w.m[1][1] * ty + p2w.m[1][2] * tz
+    s2w.m[1][1] = p2w.m[1][0] * bx + p2w.m[1][1] * by + p2w.m[1][2] * bz
+    s2w.m[1][2] = p2w.m[1][0] * nx + p2w.m[1][1] * ny + p2w.m[1][2] * nz
+    s2w.m[1][3] = p2w.m[1][3]
+
+    s2w.m[2][0] = p2w.m[2][0] * tx + p2w.m[2][1] * ty + p2w.m[2][2] * tz
+    s2w.m[2][1] = p2w.m[2][0] * bx + p2w.m[2][1] * by + p2w.m[2][2] * bz
+    s2w.m[2][2] = p2w.m[2][0] * nx + p2w.m[2][1] * ny + p2w.m[2][2] * nz
+    s2w.m[2][3] = p2w.m[2][3]
+
+    s2w.m[3][0] = p2w.m[3][0] * tx + p2w.m[3][1] * ty + p2w.m[3][2] * tz
+    s2w.m[3][1] = p2w.m[3][0] * bx + p2w.m[3][1] * by + p2w.m[3][2] * bz
+    s2w.m[3][2] = p2w.m[3][0] * nx + p2w.m[3][1] * ny + p2w.m[3][2] * nz
+    s2w.m[3][3] = p2w.m[3][3]
 
 
 cdef tuple _generate_surface_transforms(Normal3D normal):

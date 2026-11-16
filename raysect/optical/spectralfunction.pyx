@@ -154,14 +154,18 @@ cdef class SpectralFunction:
             1.095030870970234
         """
 
+        cdef double average
+
         # is a cached average already available?
-        if self._average_cache_valid(min_wavelength, max_wavelength):
-            return self._average_cache_get()
+        if self._average_cache_min_wvl == min_wavelength and self._average_cache_max_wvl == max_wavelength:
+            return self._average_cache
 
         average = self.integrate(min_wavelength, max_wavelength) / (max_wavelength - min_wavelength)
 
         # update cache
-        self._average_cache_set(min_wavelength, max_wavelength, average)
+        self._average_cache = average
+        self._average_cache_min_wvl = min_wavelength
+        self._average_cache_max_wvl = max_wavelength
 
         return average
 
@@ -193,14 +197,18 @@ cdef class SpectralFunction:
             double lower, upper, delta, reciprocal
 
         # are cached samples already available?
-        if self._sample_cache_valid(min_wavelength, max_wavelength, bins):
-            return self._sample_cache_get_array()
+        if (
+            self._sample_cache_min_wvl == min_wavelength and
+            self._sample_cache_max_wvl == max_wavelength and
+            self._sample_cache_num_samp == bins
+        ):
+            return self._sample_cache
 
         # create new sample ndarray and obtain a memoryview for fast access
         size = bins
         samples = PyArray_SimpleNew(1, &size, NPY_FLOAT64)
         PyArray_FILLWBYTE(samples, 0)
-        sample_mv = samples
+        samples_mv = samples
 
         # re-sample by averaging data across each bin
         delta = (max_wavelength - min_wavelength) / bins
@@ -208,11 +216,11 @@ cdef class SpectralFunction:
         reciprocal = 1.0 / delta
         for index in range(bins):
             upper = min_wavelength + (index + 1) * delta
-            sample_mv[index] = reciprocal * self.integrate(lower, upper)
+            samples_mv[index] = reciprocal * self.integrate(lower, upper)
             lower = upper
 
         # update cache
-        self._sample_cache_set(min_wavelength, max_wavelength, bins, samples, sample_mv)
+        self._sample_cache_set(min_wavelength, max_wavelength, bins, samples, samples_mv)
 
         return samples
 
@@ -229,12 +237,16 @@ cdef class SpectralFunction:
         :rtype: Memoryview.
         """
 
-        if self._sample_cache_valid(min_wavelength, max_wavelength, bins):
-            return self._sample_cache_get_mv()
+        if (
+            self._sample_cache_min_wvl == min_wavelength and
+            self._sample_cache_max_wvl == max_wavelength and
+            self._sample_cache_num_samp == bins
+        ):
+            return self._sample_cache_mv
 
         # populate cache
         self.sample(min_wavelength, max_wavelength, bins)
-        return self._sample_cache_get_mv()
+        return self._sample_cache_mv
 
     cdef void _average_cache_init(self):
         """

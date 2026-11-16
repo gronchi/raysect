@@ -36,7 +36,7 @@ from raysect.core cimport BoundingBox3D, BoundingSphere3D, AffineMatrix3D, _Node
 from raysect.core.acceleration cimport BoundPrimitive
 from raysect.core.math.random cimport uniform, vector_sphere, vector_cone_uniform
 from raysect.core.math.cython cimport find_index, rotate_basis
-from libc.math cimport M_PI as PI, asin, sqrt
+from libc.math cimport M_PI as PI, asin, sqrt, fabs
 cimport cython
 
 
@@ -161,28 +161,27 @@ cdef class ImportanceManager:
         :rtype: Vector3D
         """
 
-        # calculate projection of sphere (a disk) as seen from origin point and
-        # generate a random direction towards that projection
-
         cdef:
             BoundingSphere3D sphere
-            double importance, distance, angular_radius
-            Vector3D direction, sample
-            AffineMatrix3D rotation
-
-        # TODO: move the projection code to a projection method on BoundingSphere3D
+            tuple entry
+            double distance, angular_radius, inv_dist, inv_u
+            double fx, fy, fz, ux, uy, uz, rx, ry, rz, sx, sy, sz
+            Vector3D sample
 
         if self._cdf is None:
             raise ImportanceError("Attempted to sample important direction when no important primitives have been"
                                   "specified.")
 
-        sphere, importance = self._pick_sphere()
+        entry = self._pick_sphere()
+        sphere = <BoundingSphere3D> entry[0]
 
-        direction = origin.vector_to(sphere.centre)
-        distance = direction.get_length()
+        fx = sphere.centre.x - origin.x
+        fy = sphere.centre.y - origin.y
+        fz = sphere.centre.z - origin.z
+        distance = sqrt(fx * fx + fy * fy + fz * fz)
 
         # is point inside sphere?
-        if distance == 0 or distance < sphere.radius:
+        if distance == 0.0 or distance < sphere.radius:
             # the point lies inside the sphere, sample random direction from full sphere
             return vector_sphere()
 
@@ -190,12 +189,40 @@ cdef class ImportanceManager:
         angular_radius = asin(sphere.radius / distance)
 
         # sample a vector from a cone of half angle equal to the angular radius
-        sample = vector_cone_uniform(angular_radius * 180 / PI)
+        sample = vector_cone_uniform(angular_radius * 180.0 / PI)
 
-        # rotate cone to lie along vector from observation point to sphere centre
-        direction = direction.normalise()
-        rotation = rotate_basis(direction, direction.orthogonal())
-        return sample.transform(rotation)
+        # rotate cone to lie along vector from observation point to sphere centre in scalar registers
+        inv_dist = 1.0 / distance
+        fx *= inv_dist
+        fy *= inv_dist
+        fz *= inv_dist
+
+        if fabs(fx) <= 0.5:
+            rx = 1.0 - fx * fx
+            ry = -fx * fy
+            rz = -fx * fz
+        else:
+            rx = -fy * fx
+            ry = 1.0 - fy * fy
+            rz = -fy * fz
+
+        inv_u = 1.0 / sqrt(rx * rx + ry * ry + rz * rz)
+        ux = rx * inv_u
+        uy = ry * inv_u
+        uz = rz * inv_u
+
+        # right = up x forward
+        rx = uy * fz - uz * fy
+        ry = uz * fx - ux * fz
+        rz = ux * fy - uy * fx
+
+        sx = sample.x
+        sy = sample.y
+        sz = sample.z
+        sample.x = rx * sx + ux * sy + fx * sz
+        sample.y = ry * sx + uy * sy + fy * sz
+        sample.z = rz * sx + uz * sy + fz * sz
+        return sample
 
     @cython.cdivision(True)
     @cython.boundscheck(False)
@@ -211,44 +238,59 @@ cdef class ImportanceManager:
 
         cdef:
             BoundingSphere3D sphere
-            double importance, distance, solid_angle, angular_radius_cos, t
-            double pdf_all, pdf_sphere, selection_weight
-            Vector3D cone_axis
-            AffineMatrix3D rotation
+            tuple entry
+            double importance, distance, solid_angle, angular_radius_cos, t, inv_dist
+            double pdf_all, inv_total_importance
+            double ox, oy, oz, dx, dy, dz, cx, cy, cz, dot_unnorm
 
-        pdf_all = 0
-        for sphere, importance in self._spheres:
+        if self._total_importance == 0.0:
+            return 0.0
 
-            cone_axis = origin.vector_to(sphere.centre)
-            distance = cone_axis.get_length()
+        ox = origin.x
+        oy = origin.y
+        oz = origin.z
+        dx = direction.x
+        dy = direction.y
+        dz = direction.z
+        inv_total_importance = 1.0 / self._total_importance
+
+        pdf_all = 0.0
+        for entry in self._spheres:
+            sphere = <BoundingSphere3D> entry[0]
+            importance = <double> entry[1]
+
+            cx = sphere.centre.x - ox
+            cy = sphere.centre.y - oy
+            cz = sphere.centre.z - oz
+            distance = sqrt(cx * cx + cy * cy + cz * cz)
 
             # is point inside sphere?
-            if distance == 0 or distance < sphere.radius:
+            if distance == 0.0 or distance < sphere.radius:
 
                 # the point lies inside the sphere, the projection is a full sphere
-                solid_angle = 4 * PI
+                solid_angle = 4.0 * PI
 
             else:
 
+                dot_unnorm = dx * cx + dy * cy + dz * cz
+                if dot_unnorm <= 0.0:
+                    continue
+
                 # calculate cosine of angular radius of cone
-                t = sphere.radius / distance
-                angular_radius_cos = sqrt(1 - t * t)
+                inv_dist = 1.0 / distance
+                t = sphere.radius * inv_dist
+                angular_radius_cos = sqrt(1.0 - t * t)
 
                 # does the direction lie inside the cone of projection
-                cone_axis = cone_axis.normalise()
-                if direction.dot(cone_axis) < angular_radius_cos:
-                    # no contribution, outside code of projection
+                if dot_unnorm * inv_dist < angular_radius_cos:
+                    # no contribution, outside cone of projection
                     continue
 
                 # calculate solid angle
-                solid_angle = 2 * PI * (1 - angular_radius_cos)
-
-            # calculate probability
-            pdf_sphere = 1 / solid_angle
-            selection_weight = importance / self._total_importance
+                solid_angle = 2.0 * PI * (1.0 - angular_radius_cos)
 
             # add contribution to pdf
-            pdf_all += selection_weight * pdf_sphere
+            pdf_all += (importance * inv_total_importance) / solid_angle
 
         return pdf_all
 
@@ -321,7 +363,8 @@ cdef class World(CoreWorld):
         :rtype: Vector3D
         """
 
-        self.build_importance()
+        if self._importance is None:
+            self.build_importance()
         return self._importance.sample(origin)
 
     cpdef double important_direction_pdf(self, Point3D origin, Vector3D direction):
@@ -333,7 +376,8 @@ cdef class World(CoreWorld):
         :rtype: float
         """
 
-        self.build_importance()
+        if self._importance is None:
+            self.build_importance()
         return self._importance.pdf(origin, direction)
 
     cpdef bint has_important_primitives(self):
@@ -343,5 +387,6 @@ cdef class World(CoreWorld):
         :rtype: bool
         """
 
-        self.build_importance()
+        if self._importance is None:
+            self.build_importance()
         return self._importance.has_primitives()

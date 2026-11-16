@@ -166,22 +166,29 @@ cpdef (double, double, double) spectrum_to_ciexyz(Spectrum spectrum, double[:,::
     """
 
     cdef:
-        double x, y, z
-        int index
+        double x, y, z, dw, s_val
+        int index, bins
+        double *s_ptr
+        double *xyz_ptr
 
+    bins = spectrum.bins
     if resampled_xyz is None:
-        resampled_xyz = resample_ciexyz(spectrum.min_wavelength, spectrum.max_wavelength, spectrum.bins)
+        resampled_xyz = resample_ciexyz(spectrum.min_wavelength, spectrum.max_wavelength, bins)
 
-    if resampled_xyz.shape[0] != spectrum.bins or resampled_xyz.shape[1] != 3:
+    if resampled_xyz.shape[0] != bins or resampled_xyz.shape[1] != 3:
         raise ValueError("The supplied resampled_xyz array size is inconsistent with the number of spectral bins or channel count.")
 
-    x = 0
-    y = 0
-    z = 0
-    for index in range(spectrum.bins):
-        x += spectrum.delta_wavelength * spectrum.samples_mv[index] * resampled_xyz[index, 0]
-        y += spectrum.delta_wavelength * spectrum.samples_mv[index] * resampled_xyz[index, 1]
-        z += spectrum.delta_wavelength * spectrum.samples_mv[index] * resampled_xyz[index, 2]
+    x = 0.0
+    y = 0.0
+    z = 0.0
+    dw = spectrum.delta_wavelength
+    s_ptr = &spectrum.samples_mv[0]
+    xyz_ptr = &resampled_xyz[0, 0]
+    for index in range(bins):
+        s_val = dw * s_ptr[index]
+        x += s_val * xyz_ptr[index * 3]
+        y += s_val * xyz_ptr[index * 3 + 1]
+        z += s_val * xyz_ptr[index * 3 + 2]
 
     return x, y, z
 

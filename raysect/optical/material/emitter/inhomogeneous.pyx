@@ -30,6 +30,7 @@
 # POSSIBILITY OF SUCH DAMAGE.
 
 from raysect.optical cimport new_point3d
+from raysect.core.math.affinematrix cimport _mat4_is_identity
 from libc.math cimport floor
 cimport cython
 
@@ -110,15 +111,23 @@ cdef class NumericalIntegrator(VolumeIntegrator):
                              AffineMatrix3D world_to_primitive, AffineMatrix3D primitive_to_world):
 
         cdef:
-            Point3D start, end
+            Point3D start, end, sample_point
             Vector3D integration_direction, ray_direction
-            double length, step, t, c
+            double length, step, t, c, sx, sy, sz, dx, dy, dz
             Spectrum emission, emission_previous, temp
             int intervals, interval, index
+            int bins
+            double *spec_ptr
+            double *em_ptr
+            double *em_prev_ptr
 
         # convert start and end points to local space
-        start = start_point.transform(world_to_primitive)
-        end = end_point.transform(world_to_primitive)
+        if _mat4_is_identity(world_to_primitive):
+            start = start_point
+            end = end_point
+        else:
+            start = start_point.transform(world_to_primitive)
+            end = end_point.transform(world_to_primitive)
 
         # obtain local space ray direction and integration length
         integration_direction = start.vector_to(end)
@@ -141,35 +150,47 @@ cdef class NumericalIntegrator(VolumeIntegrator):
         emission = ray.new_spectrum()
         emission_previous = ray.new_spectrum()
 
+        bins = spectrum.bins
         # sample point and sanity check as bounds checking is disabled
         emission_previous = material.emission_function(start, ray_direction, emission_previous, world, ray, primitive, world_to_primitive, primitive_to_world)
-        self._check_dimensions(emission_previous, spectrum.bins)
+        if emission_previous.samples.ndim != 1 or emission_previous.samples.shape[0] != bins:
+            raise ValueError("Spectrum returned by emission function has the wrong number of samples.")
 
         # numerical integration
         c = 0.5 * step
+        sx = start.x
+        sy = start.y
+        sz = start.z
+        dx = integration_direction.x
+        dy = integration_direction.y
+        dz = integration_direction.z
+        sample_point = new_point3d(sx, sy, sz)
+        spec_ptr = &spectrum.samples_mv[0]
+
         for interval in range(0, intervals):
 
             # calculate location of sample point at the top of the interval
             t = (interval + 1) * step
-            sample_point = new_point3d(
-                start.x + t * integration_direction.x,
-                start.y + t * integration_direction.y,
-                start.z + t * integration_direction.z
-            )
+            sample_point.x = sx + t * dx
+            sample_point.y = sy + t * dy
+            sample_point.z = sz + t * dz
 
             # sample point and sanity check as bounds checking is disabled
             emission = material.emission_function(sample_point, ray_direction, emission, world, ray, primitive, world_to_primitive, primitive_to_world)
-            self._check_dimensions(emission, spectrum.bins)
+            if emission.samples.ndim != 1 or emission.samples.shape[0] != bins:
+                raise ValueError("Spectrum returned by emission function has the wrong number of samples.")
 
-            # trapezium rule integration
-            for index in range(spectrum.bins):
-                spectrum.samples_mv[index] += c * (emission.samples_mv[index] + emission_previous.samples_mv[index])
+            # trapezium rule integration + fused buffer clear in a single pass
+            em_ptr = &emission.samples_mv[0]
+            em_prev_ptr = &emission_previous.samples_mv[0]
+            for index in range(bins):
+                spec_ptr[index] += c * (em_ptr[index] + em_prev_ptr[index])
+                em_prev_ptr[index] = 0.0
 
-            # swap buffers and clear the active buffer
+            # swap buffers (emission_previous was already cleared in the loop above)
             temp = emission_previous
             emission_previous = emission
             emission = temp
-            emission.clear()
 
         return spectrum
 

@@ -30,14 +30,74 @@
 # POSSIBILITY OF SUCH DAMAGE.
 
 from libc.math cimport M_PI as PI, asin, cos, INFINITY
+from libc.stdint cimport int32_t
 
 from raysect.core cimport Intersection
+from raysect.core.boundingbox cimport _bbox_contains_inline
+from raysect.core.acceleration.kdtree cimport KDTree, _PrimitiveKDTree
+from raysect.core.acceleration.boundprimitive cimport BoundPrimitive
+from raysect.core.math.spatial.kdtree3d cimport kdnode
 from raysect.core.math.random cimport probability
 from raysect.core.math.cython cimport clamp
 from raysect.optical.material.material cimport Material
 from raysect.optical.spectrum cimport new_spectrum
 from raysect.optical.scenegraph cimport Primitive
 cimport cython
+
+cdef type _Lambert_type = None
+cdef type _UniformSurfaceEmitter_type = None
+cdef type _AbsorbingSurface_type = None
+cdef type _Conductor_type = None
+cdef type _RoughConductor_type = None
+cdef type _NullMaterial_type = None
+cdef type _NullVolume_type = None
+cdef type _UnitySurfaceEmitter_type = None
+cdef type _Checkerboard_type = None
+cdef type _Light_type = None
+cdef type _PerfectReflectingSurface_type = None
+cdef bint _volume_types_initialised = False
+
+
+cdef void _init_volume_types():
+    global _Lambert_type, _UniformSurfaceEmitter_type, _AbsorbingSurface_type
+    global _Conductor_type, _RoughConductor_type, _NullMaterial_type, _NullVolume_type
+    global _UnitySurfaceEmitter_type, _Checkerboard_type, _Light_type, _PerfectReflectingSurface_type
+    global _volume_types_initialised
+    from raysect.optical.material import (
+        Lambert, UniformSurfaceEmitter, AbsorbingSurface,
+        Conductor, RoughConductor, NullMaterial, NullVolume,
+        UnitySurfaceEmitter, Checkerboard
+    )
+    from raysect.optical.material.debug import Light, PerfectReflectingSurface
+    _Lambert_type = Lambert
+    _UniformSurfaceEmitter_type = UniformSurfaceEmitter
+    _AbsorbingSurface_type = AbsorbingSurface
+    _Conductor_type = Conductor
+    _RoughConductor_type = RoughConductor
+    _NullMaterial_type = NullMaterial
+    _NullVolume_type = NullVolume
+    _UnitySurfaceEmitter_type = UnitySurfaceEmitter
+    _Checkerboard_type = Checkerboard
+    _Light_type = Light
+    _PerfectReflectingSurface_type = PerfectReflectingSurface
+    _volume_types_initialised = True
+
+
+cdef inline bint _is_null_volume_material(Material material) noexcept:
+    cdef type t = type(material)
+    return (
+        t is _Lambert_type or
+        t is _UniformSurfaceEmitter_type or
+        t is _AbsorbingSurface_type or
+        t is _Conductor_type or
+        t is _RoughConductor_type or
+        t is _NullMaterial_type or
+        t is _NullVolume_type or
+        t is _UnitySurfaceEmitter_type or
+        t is _Checkerboard_type or
+        t is _Light_type or
+        t is _PerfectReflectingSurface_type
+    )
 
 
 cdef class Ray(CoreRay):
@@ -419,6 +479,8 @@ cdef class Ray(CoreRay):
                                          intersection.primitive_to_world,
                                          intersection)
 
+    @cython.boundscheck(False)
+    @cython.wraparound(False)
     cdef Spectrum _sample_volumes(self, Spectrum spectrum, Intersection intersection, World world):
 
         cdef:
@@ -426,6 +488,55 @@ cdef class Ray(CoreRay):
             Point3D start_point, end_point
             Primitive primitive
             Material material
+            _PrimitiveKDTree pkdtree
+            kdnode *nodes
+            double *pt
+            int32_t id, count, item, index
+            BoundPrimitive bound_primitive
+
+        if not _volume_types_initialised:
+            _init_volume_types()
+
+        if type(world._accelerator) is KDTree:
+            if world._rebuild_accelerator:
+                world.build_accelerator()
+            pkdtree = (<KDTree> world._accelerator)._kdtree
+            end_point = self.origin
+            if not _bbox_contains_inline(pkdtree.bounds, end_point):
+                return spectrum
+            nodes = pkdtree._nodes
+            pt = &end_point.x
+            id = 0
+            while nodes[id].type != -1:
+                if pt[nodes[id].type] < nodes[id].split:
+                    id += 1
+                else:
+                    id = nodes[id].count
+            count = nodes[id].count
+            if count == 0:
+                return spectrum
+            start_point = None
+            for item in range(count):
+                index = nodes[id].items[item]
+                bound_primitive = <BoundPrimitive> pkdtree.primitives[index]
+                primitive = bound_primitive.primitive
+                material = <Material> primitive.get_material()
+                if _is_null_volume_material(material):
+                    continue
+                if bound_primitive.contains(end_point):
+                    if start_point is None:
+                        start_point = intersection.hit_point.transform(intersection.primitive_to_world)
+                    spectrum = material.evaluate_volume(
+                        spectrum,
+                        world,
+                        self,
+                        primitive,
+                        start_point,
+                        end_point,
+                        primitive._root_transform_inverse,
+                        primitive._root_transform
+                    )
+            return spectrum
 
         # identify any primitive volumes the ray is propagating through
         primitives = world.contains(self.origin)
@@ -441,6 +552,8 @@ cdef class Ray(CoreRay):
             for primitive in primitives:
 
                 material = primitive.get_material()
+                if _is_null_volume_material(material):
+                    continue
                 spectrum = material.evaluate_volume(
                     spectrum,
                     world,
@@ -448,8 +561,8 @@ cdef class Ray(CoreRay):
                     primitive,
                     start_point,
                     end_point,
-                    primitive.to_local(),
-                    primitive.to_root()
+                    primitive._root_transform_inverse,
+                    primitive._root_transform
                 )
 
         return spectrum

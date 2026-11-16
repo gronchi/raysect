@@ -32,6 +32,7 @@
 from raysect.core.math.sampler cimport HemisphereCosineSampler
 from raysect.optical cimport Point3D, Vector3D, AffineMatrix3D, Primitive, World, Ray, Spectrum, SpectralFunction, ConstantSF, Intersection
 from raysect.optical.material cimport ContinuousBSDF
+cimport cython
 
 
 cdef HemisphereCosineSampler hemisphere_sampler = HemisphereCosineSampler()
@@ -74,6 +75,9 @@ cdef class Lambert(ContinuousBSDF):
     cpdef Vector3D sample(self, Vector3D s_incoming, bint back_face):
         return hemisphere_sampler.sample()
 
+    @cython.boundscheck(False)
+    @cython.wraparound(False)
+    @cython.initializedcheck(False)
     cpdef Spectrum evaluate_shading(self, World world, Ray ray, Vector3D s_incoming, Vector3D s_outgoing,
                                     Point3D w_reflection_origin, Point3D w_transmission_origin, bint back_face,
                                     AffineMatrix3D world_to_surface, AffineMatrix3D surface_to_world,
@@ -83,7 +87,10 @@ cdef class Lambert(ContinuousBSDF):
             Spectrum spectrum
             Ray reflected
             double[::1] reflectivity
+            double *spec_ptr
+            double *refl_ptr
             double pdf
+            int index, bins
 
         # outgoing ray is sampling incident light so s_outgoing = incident
 
@@ -97,11 +104,14 @@ cdef class Lambert(ContinuousBSDF):
         spectrum = reflected.trace(world)
 
         # obtain samples of reflectivity
-        reflectivity = self.reflectivity.sample_mv(spectrum.min_wavelength, spectrum.max_wavelength, spectrum.bins)
+        bins = spectrum.bins
+        reflectivity = self.reflectivity.sample_mv(spectrum.min_wavelength, spectrum.max_wavelength, bins)
 
-        # combine and normalise
-        spectrum.mul_array(reflectivity)
-        spectrum.mul_scalar(pdf)
+        # combine and normalise in a single pass
+        spec_ptr = &spectrum.samples_mv[0]
+        refl_ptr = &reflectivity[0]
+        for index in range(bins):
+            spec_ptr[index] = (spec_ptr[index] * refl_ptr[index]) * pdf
         return spectrum
 
     cpdef Spectrum evaluate_volume(self, Spectrum spectrum, World world, Ray ray, Primitive primitive,
