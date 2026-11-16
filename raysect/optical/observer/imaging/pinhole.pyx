@@ -34,9 +34,11 @@ from raysect.optical.observer.pipeline import RGBPipeline2D
 from raysect.optical.observer.sampler2d import RGBAdaptiveSampler2D
 
 from raysect.core cimport Point3D, new_point3d, Vector3D, new_vector3d, RectangleSampler3D
-from raysect.optical cimport Ray
-from libc.math cimport M_PI as pi, tan
+from raysect.core.math.random cimport uniform
+from raysect.optical cimport Ray, new_ray
+from libc.math cimport M_PI as pi, tan, sqrt
 from raysect.optical.observer.base cimport Observer2D
+cimport cython
 
 
 cdef class PinholeCamera(Observer2D):
@@ -166,40 +168,50 @@ cdef class PinholeCamera(Observer2D):
         else:
             raise RuntimeError("Number of Pinhole camera Pixels must be > 1.")
 
+    @cython.cdivision(True)
     cpdef list _generate_rays(self, int x, int y, Ray template, int ray_count):
 
         cdef:
-            double pixel_x, pixel_y
-            list points, rays
-            Point3D pixel_centre, point, origin
+            double pixel_x, pixel_y, width, height, width_offset, height_offset
+            double dx, dy, dz, inv_len
+            list rays
+            Point3D origin
             Vector3D direction
             Ray ray
+            int i
 
-        # generate pixel transform
+        # generate pixel centre offsets
         pixel_x = self.image_start_x - self.image_delta * (x + 0.5)
         pixel_y = self.image_start_y - self.image_delta * (y + 0.5)
-        pixel_centre = new_point3d(pixel_x, pixel_y, 1)
+        width = self.point_sampler.width
+        height = self.point_sampler.height
+        width_offset = 0.5 * width
+        height_offset = 0.5 * height
+        origin = new_point3d(0.0, 0.0, 0.0)
 
-        points = self.point_sampler.samples(ray_count)
-
-        # assemble rays
+        # assemble rays directly without intermediate Point3D list or unnormalised Vector3D allocations
         rays = []
-        for point in points:
+        for i in range(ray_count):
 
-            # calculate point in virtual image plane to be used for ray direction
-            origin = new_point3d(0, 0, 0)
-            direction = new_vector3d(
-                point.x + pixel_centre.x,
-                point.y + pixel_centre.y,
-                point.z + pixel_centre.z
-            ).normalise()
+            dx = (uniform() * width - width_offset) + pixel_x
+            dy = (uniform() * height - height_offset) + pixel_y
+            inv_len = 1.0 / sqrt(dx * dx + dy * dy + 1.0)
+            dz = inv_len
+            direction = new_vector3d(dx * inv_len, dy * inv_len, dz)
 
-            ray = template.copy(origin, direction)
+            ray = new_ray(
+                origin, direction,
+                template._min_wavelength, template._max_wavelength, template._bins,
+                template.max_distance,
+                template._extinction_prob, template._extinction_min_depth, template._max_depth,
+                template.importance_sampling,
+                template._important_path_weight
+            )
 
             # non-physical camera, samples radiance directly
             # projected area weight is normal.incident which simplifies
             # to incident.z here as the normal is (0, 0 ,1)
-            rays.append((ray, direction.z))
+            rays.append((ray, dz))
 
         return rays
 

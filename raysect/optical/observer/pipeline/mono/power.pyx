@@ -765,18 +765,20 @@ cdef class PowerPixelProcessor(PixelProcessor):
 
     @cython.boundscheck(False)
     @cython.wraparound(False)
+    @cython.initializedcheck(False)
     cpdef object add_sample(self, Spectrum spectrum, double sensitivity):
 
         cdef:
-            int index
-            double total = 0
-            Spectrum filtered
+            int index, bins = spectrum.bins
+            double total = 0.0
+            double *s_ptr = &spectrum.samples_mv[0]
+            double *f_ptr = &self.filter[0]
 
         # apply filter curve and integrate
-        for index in range(spectrum.bins):
-            total += spectrum.samples_mv[index] * self.filter[index] * sensitivity * spectrum.delta_wavelength
+        for index in range(bins):
+            total += s_ptr[index] * f_ptr[index]
 
-        self.bin.add_sample(total)
+        self.bin.add_sample(total * (sensitivity * spectrum.delta_wavelength))
 
     cpdef tuple pack_results(self):
         return self.bin.mean, self.bin.variance

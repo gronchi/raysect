@@ -204,7 +204,10 @@ class MulticoreEngine(RenderEngine):
         tasks_per_job = self._context.Value('i')
 
         # start process to generate jobs
-        tasks_per_job.value = self._tasks_per_job
+        if self._auto_tasks_per_job and self._tasks_per_job == 1 and len(tasks) > self._processes * 4:
+            tasks_per_job.value = max(1, min(32, len(tasks) // (self._processes * 8)))
+        else:
+            tasks_per_job.value = self._tasks_per_job
         producer = self._context.Process(target=self._producer, args=(tasks, job_queue, tasks_per_job))
         producer.start()
 
@@ -247,6 +250,10 @@ class MulticoreEngine(RenderEngine):
         for _ in workers:
             job_queue.put(None)
 
+        for worker in workers:
+            worker.join()
+        producer.join()
+
         # store tasks per job value for next run
         self._tasks_per_job = tasks_per_job.value
 
@@ -257,7 +264,7 @@ class MulticoreEngine(RenderEngine):
 
         # initialise request rate controller constants
         target_rate = 50  # requests per second
-        min_time = 1      # seconds
+        min_time = 0.1    # seconds
         min_requests = min(2 * target_rate, 5 * self._processes)
         tasks_per_job = stored_tasks_per_job.value
 

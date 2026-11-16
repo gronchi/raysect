@@ -33,6 +33,8 @@ from time import time
 from raysect.core.workflow import RenderEngine, MulticoreEngine
 
 cimport cython
+from raysect.core cimport AffineMatrix3D, Point3D
+from raysect.core.math.affinematrix cimport _mat4_is_identity
 from raysect.optical cimport World, Spectrum
 from raysect.optical.observer.base.sampler cimport FrameSampler1D, FrameSampler2D
 from raysect.optical.observer.base.pipeline cimport Pipeline0D, Pipeline1D, Pipeline2D
@@ -295,6 +297,10 @@ cdef class _ObserverBase(Observer):
         # initialise statistics with total task count
         self._initialise_statistics(tasks)
 
+        # ensure scene acceleration and importance structures are built before launching workers
+        (<World> self.root).build_accelerator()
+        (<World> self.root).build_importance()
+
         # render each spectral slice
         for slice_id, template in enumerate(templates):
 
@@ -376,12 +382,16 @@ cdef class _ObserverBase(Observer):
         cdef:
             World world
             list rays, pixel_processors
-            PixelProcessor processor
+            PixelProcessor processor, single_processor
             uint64_t ray_count
             double sensitivity, projection_weight
             Ray ray
             Spectrum spectrum
             list results
+            AffineMatrix3D to_world
+            bint is_identity
+            Point3D last_local_origin, last_world_origin
+            tuple ray_entry
 
         # obtain reference to world
         world = self.root
@@ -389,6 +399,7 @@ cdef class _ObserverBase(Observer):
         # generate rays and obtain pixel processors from each pipeline
         rays = self._obtain_rays(task, template)
         pixel_processors = self._obtain_pixel_processors(task, slice_id)
+        single_processor = <PixelProcessor> pixel_processors[0] if len(pixel_processors) == 1 else None
 
         # initialise ray statistics
         ray_count = 0
@@ -396,19 +407,36 @@ cdef class _ObserverBase(Observer):
         # obtain pixel sensitivity to convert spectral radiance to spectral power
         sensitivity = self._obtain_sensitivity(task)
 
+        to_world = self._root_transform
+        is_identity = _mat4_is_identity(to_world)
+        last_local_origin = None
+        last_world_origin = None
+
         # launch rays and accumulate spectral samples
-        for ray, projection_weight in rays:
+        for ray_entry in rays:
+            ray = <Ray> ray_entry[0]
+            projection_weight = <double> ray_entry[1]
 
             # convert ray from local space to world space
-            ray.origin = ray.origin.transform(self.to_root())
-            ray.direction = ray.direction.transform(self.to_root())
+            if not is_identity:
+                if ray.origin is last_local_origin:
+                    ray.origin = last_world_origin
+                else:
+                    last_local_origin = ray.origin
+                    last_world_origin = ray.origin.transform(to_world)
+                    ray.origin = last_world_origin
+                ray.direction = ray.direction.transform(to_world)
 
             # sample, apply projection weight
             spectrum = ray.trace(world)
-            spectrum.mul_scalar(projection_weight)
+            if projection_weight != 1.0:
+                spectrum.mul_scalar(projection_weight)
 
-            for processor in pixel_processors:
-                processor.add_sample(spectrum, sensitivity)
+            if single_processor is not None:
+                single_processor.add_sample(spectrum, sensitivity)
+            else:
+                for processor in pixel_processors:
+                    processor.add_sample(spectrum, sensitivity)
 
             # accumulate statistics
             ray_count += ray.ray_count
