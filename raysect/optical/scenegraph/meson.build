@@ -27,3 +27,4 @@ py.install_sources(
     subdir: target_path
 )
 
+subdir('tests')

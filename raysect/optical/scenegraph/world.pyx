@@ -30,9 +30,9 @@
 # POSSIBILITY OF SUCH DAMAGE.
 
 import numpy as np
-from raysect.core.scenegraph.signal import MATERIAL
+from raysect.core.scenegraph.signal import GEOMETRY, MATERIAL
 
-from raysect.core cimport BoundingBox3D, BoundingSphere3D, AffineMatrix3D, _NodeBase, ChangeSignal
+from raysect.core cimport BoundingBox3D, BoundingSphere3D, AffineMatrix3D, Primitive, _NodeBase, ChangeSignal
 from raysect.core.acceleration cimport BoundPrimitive
 from raysect.core.math.random cimport uniform, vector_sphere, vector_cone_uniform
 from raysect.core.math.cython cimport find_index, rotate_basis
@@ -76,7 +76,7 @@ cdef class ImportanceManager:
         self._calculate_cdf()
 
     def __getstate__(self):
-        state = self._cdf, self._total_importance, self._spheres
+        return self._cdf, self._total_importance, self._spheres
 
     def __setstate__(self, state):
         self._cdf, self._total_importance, self._spheres = state
@@ -333,6 +333,13 @@ cdef class World(CoreWorld):
         if self._importance is None or force:
             self._importance = ImportanceManager(self.primitives)
 
+    def _deregister(self, _NodeBase node):
+
+        super()._deregister(node)
+        if isinstance(node, Primitive):
+            # Geometry notifications go to the new root after a primitive is detached.
+            self._importance = None
+
     def _change(self, _NodeBase node, ChangeSignal change not None):
         """
         Notifies the World of a change to the scene-graph.
@@ -344,12 +351,11 @@ cdef class World(CoreWorld):
         The node on which the change occurs and a ChangeSignal must be
         provided. The ChangeSignal must specify the nature of the change.
 
-        The optical World object only recognises the MATERIAL signal. When a
-        MATERIAL signal is recieved, the ImportanceManager is rebuilt to reflect
-        changes to the important primitive list and their respective weights.
+        The GEOMETRY and MATERIAL signals invalidate the ImportanceManager so
+        the next importance query rebuilds the primitive bounds and weights.
         """
 
-        if change is MATERIAL:
+        if change is GEOMETRY or change is MATERIAL:
             self._importance = None
 
         super()._change(node, change)
