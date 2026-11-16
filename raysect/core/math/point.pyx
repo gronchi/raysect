@@ -35,7 +35,7 @@ from raysect.core.math.vector cimport new_vector2d, new_vector3d
 from raysect.core.math._vec3 cimport _Vec3
 
 
-@cython.freelist(256)
+@cython.freelist(1024)
 cdef class Point3D:
     """
     Represents a point in 3D affine space.
@@ -268,20 +268,24 @@ cdef class Point3D:
         :rtype: Point3D
         """
 
-        cdef double w
+        cdef double x, y, z, w
+
+        x = m.m[0][0] * self.x + m.m[0][1] * self.y + m.m[0][2] * self.z + m.m[0][3]
+        y = m.m[1][0] * self.x + m.m[1][1] * self.y + m.m[1][2] * self.z + m.m[1][3]
+        z = m.m[2][0] * self.x + m.m[2][1] * self.y + m.m[2][2] * self.z + m.m[2][3]
 
         # 4th element of homogeneous coordinate
         w = m.m[3][0] * self.x + m.m[3][1] * self.y + m.m[3][2] * self.z + m.m[3][3]
-        if w == 0.0:
-            raise ZeroDivisionError("Bad matrix transform, 4th element of homogeneous coordinate is zero.")
+        if w != 1.0:
+            if w == 0.0:
+                raise ZeroDivisionError("Bad matrix transform, 4th element of homogeneous coordinate is zero.")
+            # pre divide for speed (dividing is much slower than multiplying)
+            w = 1.0 / w
+            x *= w
+            y *= w
+            z *= w
 
-        # pre divide for speed (dividing is much slower than multiplying)
-        w = 1.0 / w
-        return new_point3d(
-            (m.m[0][0] * self.x + m.m[0][1] * self.y + m.m[0][2] * self.z + m.m[0][3]) * w,
-            (m.m[1][0] * self.x + m.m[1][1] * self.y + m.m[1][2] * self.z + m.m[1][3]) * w,
-            (m.m[2][0] * self.x + m.m[2][1] * self.y + m.m[2][2] * self.z + m.m[2][3]) * w
-        )
+        return new_point3d(x, y, z)
 
     cdef Point3D add(self, _Vec3 v):
         """

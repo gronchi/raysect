@@ -32,6 +32,8 @@
 from raysect.core.boundingsphere cimport BoundingSphere3D
 from raysect.core.math cimport Point3D, Point2D
 from raysect.core.ray cimport Ray
+from libc.math cimport INFINITY
+cimport cython
 
 
 cdef class BoundingBox3D:
@@ -56,6 +58,73 @@ cdef class BoundingBox3D:
     cpdef object pad(self, double padding)
     cpdef object pad_axis(self, int axis, double padding)
     cpdef BoundingSphere3D enclosing_sphere(self)
+
+
+@cython.cdivision(True)
+cdef inline void _slab_inline(double origin, double direction, double lower, double upper, double *front_intersection, double *back_intersection) noexcept nogil:
+
+    cdef double reciprocal, tmin, tmax
+
+    if direction != 0.0:
+
+        reciprocal = 1.0 / direction
+
+        if direction > 0.0:
+            tmin = (lower - origin) * reciprocal
+            tmax = (upper - origin) * reciprocal
+        else:
+            tmin = (upper - origin) * reciprocal
+            tmax = (lower - origin) * reciprocal
+
+    else:
+
+        if origin < lower:
+            tmin = -INFINITY
+            tmax = -INFINITY
+        elif origin > upper:
+            tmin = INFINITY
+            tmax = INFINITY
+        else:
+            tmin = -INFINITY
+            tmax = INFINITY
+
+    if tmin > front_intersection[0]:
+        front_intersection[0] = tmin
+
+    if tmax < back_intersection[0]:
+        back_intersection[0] = tmax
+
+
+cdef inline bint _bbox_intersect_inline(BoundingBox3D box, Ray ray, double *front_intersection, double *back_intersection) noexcept nogil:
+
+    front_intersection[0] = -INFINITY
+    back_intersection[0] = INFINITY
+
+    _slab_inline(ray.origin.x, ray.direction.x, box.lower.x, box.upper.x, front_intersection, back_intersection)
+    _slab_inline(ray.origin.y, ray.direction.y, box.lower.y, box.upper.y, front_intersection, back_intersection)
+    _slab_inline(ray.origin.z, ray.direction.z, box.lower.z, box.upper.z, front_intersection, back_intersection)
+
+    if front_intersection[0] > back_intersection[0]:
+        return False
+
+    if (front_intersection[0] < 0.0) and (back_intersection[0] < 0.0):
+        return False
+    return True
+
+
+cdef inline bint _bbox_hit_inline(BoundingBox3D box, Ray ray) noexcept nogil:
+    cdef double front_intersection, back_intersection
+    return _bbox_intersect_inline(box, ray, &front_intersection, &back_intersection)
+
+
+cdef inline bint _bbox_contains_inline(BoundingBox3D box, Point3D point) noexcept nogil:
+    if (point.x < box.lower.x) or (point.x > box.upper.x):
+        return False
+    if (point.y < box.lower.y) or (point.y > box.upper.y):
+        return False
+    if (point.z < box.lower.z) or (point.z > box.upper.z):
+        return False
+    return True
 
 
 cdef inline BoundingBox3D new_boundingbox3d(Point3D lower, Point3D upper):

@@ -31,6 +31,9 @@
 
 # TODO: add docstrings
 
+from raysect.core.boundingbox cimport _bbox_hit_inline, _bbox_contains_inline
+
+
 cdef class BoundPrimitive:
 
     def __init__(self, Primitive primitive not None):
@@ -41,7 +44,7 @@ cdef class BoundPrimitive:
 
     cdef Intersection hit(self, Ray ray):
 
-        if self.box.hit(ray):
+        if _bbox_hit_inline(self.box, ray):
             self._primitive_tested = True
             return self.primitive.hit(ray)
 
@@ -61,6 +64,6 @@ cdef class BoundPrimitive:
 
     cdef bint contains(self, Point3D point):
 
-        if self.box.contains(point):
+        if _bbox_contains_inline(self.box, point):
             return self.primitive.contains(point)
         return False

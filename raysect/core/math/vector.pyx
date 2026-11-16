@@ -439,6 +439,7 @@ cdef class Vector3D(_Vec3):
         return new_vector3d(self.x, self.y, self.z)
 
     # todo: this is common code with normal, move into math.cython and call
+    @cython.cdivision(True)
     cpdef Vector3D orthogonal(self):
         """
         Returns a unit vector that is guaranteed to be orthogonal to the vector.
@@ -452,24 +453,29 @@ cdef class Vector3D(_Vec3):
             Vector3D(0.0, 1.0, 0.0)
         """
 
-        cdef:
-            Vector3D n
-            Vector3D v
-            double m
+        cdef double t, nx, ny, nz, vx, vy, vz
 
-        n = self.normalise()
+        t = self.x * self.x + self.y * self.y + self.z * self.z
+        if t == 0.0:
+            raise ZeroDivisionError("A zero length vector can not be normalised as the direction of a zero length vector is undefined.")
+
+        t = 1.0 / sqrt(t)
+        nx = self.x * t
+        ny = self.y * t
+        nz = self.z * t
 
         # try x-axis first, if too closely aligned use the y-axis
-        v = new_vector3d(1, 0, 0)
-        if fabs(n.dot(v)) > 0.5:
-            v = new_vector3d(0, 1, 0)
+        if fabs(nx) <= 0.5:
+            vx = 1.0 - nx * nx
+            vy = -nx * ny
+            vz = -nx * nz
+        else:
+            vx = -ny * nx
+            vy = 1.0 - ny * ny
+            vz = -ny * nz
 
-        # make vector perpendicular to normal
-        m = n.dot(v)
-        v = new_vector3d(v.x - m * n.x, v.y - m * n.y, v.z - m * n.z)
-        v = v.normalise()
-
-        return v
+        t = 1.0 / sqrt(vx * vx + vy * vy + vz * vz)
+        return new_vector3d(vx * t, vy * t, vz * t)
 
     cpdef Vector3D lerp(self, Vector3D b, double t):
         """
@@ -604,6 +610,7 @@ cdef class Vector3D(_Vec3):
         return v_vec.mul((1 - t) * a_magnitude + t * b_magnitude)
 
 
+@cython.freelist(512)
 cdef class Vector2D:
     """
     Represents a vector in 2D space.

@@ -142,7 +142,8 @@ cdef class World(_NodeBase):
         :rtype: Intersection
         """
 
-        self.build_accelerator()
+        if self._rebuild_accelerator:
+            self.build_accelerator()
         return self._accelerator.hit(ray)
 
     # TODO - better name - world.primitives_containing(point)
@@ -164,7 +165,8 @@ cdef class World(_NodeBase):
         :rtype: list
         """
 
-        self.build_accelerator()
+        if self._rebuild_accelerator:
+            self.build_accelerator()
         return self._accelerator.contains(point)
 
     cpdef build_accelerator(self, bint force=False):

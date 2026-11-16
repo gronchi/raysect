@@ -32,7 +32,7 @@
 cimport cython
 
 
-@cython.freelist(256)
+@cython.freelist(1024)
 cdef class _Mat4:
     """4x4 matrix base class."""
 

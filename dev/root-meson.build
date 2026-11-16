@@ -1,6 +1,12 @@
-project('raysect', 'cython',
-    default_options: ['python.install_env=auto'],
+project('raysect', 'c', 'cython',
+    default_options: ['python.install_env=auto', 'buildtype=release', 'optimization=3'],
     version: run_command(['dev/build/update_version.sh'], check: true).stdout().strip()
+)
+
+cc = meson.get_compiler('c')
+add_project_arguments(
+    cc.get_supported_arguments(['-O3', '-fno-math-errno', '-fno-trapping-math']),
+    language: 'c'
 )
 
 # when building a distribution, copy the dynamically generated _version.py to the distribution folder

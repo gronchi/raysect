@@ -30,12 +30,52 @@
 # POSSIBILITY OF SUCH DAMAGE.
 
 from raysect.core.math._mat4 cimport _Mat4
+cimport cython
 
 
 cdef class AffineMatrix3D(_Mat4):
 
     cpdef AffineMatrix3D inverse(self)
     cdef AffineMatrix3D mul(self, AffineMatrix3D m)
+
+
+cdef inline bint _mat4_is_identity(AffineMatrix3D m) noexcept nogil:
+    return (
+        m.m[0][0] == 1.0 and m.m[1][1] == 1.0 and m.m[2][2] == 1.0 and m.m[3][3] == 1.0 and
+        m.m[0][3] == 0.0 and m.m[1][3] == 0.0 and m.m[2][3] == 0.0 and
+        m.m[0][1] == 0.0 and m.m[0][2] == 0.0 and
+        m.m[1][0] == 0.0 and m.m[1][2] == 0.0 and
+        m.m[2][0] == 0.0 and m.m[2][1] == 0.0 and
+        m.m[3][0] == 0.0 and m.m[3][1] == 0.0 and m.m[3][2] == 0.0
+    )
+
+
+@cython.cdivision(True)
+cdef inline void _transform_ray_inline(
+    double rx, double ry, double rz,
+    double rdx, double rdy, double rdz,
+    AffineMatrix3D m,
+    double *ox, double *oy, double *oz,
+    double *dx, double *dy, double *dz
+) except *:
+    cdef double x, y, z, w
+    x = m.m[0][0] * rx + m.m[0][1] * ry + m.m[0][2] * rz + m.m[0][3]
+    y = m.m[1][0] * rx + m.m[1][1] * ry + m.m[1][2] * rz + m.m[1][3]
+    z = m.m[2][0] * rx + m.m[2][1] * ry + m.m[2][2] * rz + m.m[2][3]
+    w = m.m[3][0] * rx + m.m[3][1] * ry + m.m[3][2] * rz + m.m[3][3]
+    if w != 1.0:
+        if w == 0.0:
+            raise ZeroDivisionError("Bad matrix transform, 4th element of homogeneous coordinate is zero.")
+        w = 1.0 / w
+        x *= w
+        y *= w
+        z *= w
+    ox[0] = x
+    oy[0] = y
+    oz[0] = z
+    dx[0] = m.m[0][0] * rdx + m.m[0][1] * rdy + m.m[0][2] * rdz
+    dy[0] = m.m[1][0] * rdx + m.m[1][1] * rdy + m.m[1][2] * rdz
+    dz[0] = m.m[2][0] * rdx + m.m[2][1] * rdy + m.m[2][2] * rdz
 
 
 cdef inline AffineMatrix3D new_affinematrix3d(double m00, double m01, double m02, double m03,

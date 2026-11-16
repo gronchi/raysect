@@ -32,7 +32,7 @@
 cimport cython
 
 
-@cython.freelist(256)
+@cython.freelist(1024)
 cdef class Intersection:
     """
     Describes the result of a ray-primitive intersection.

@@ -32,7 +32,7 @@
 import io
 import struct
 
-from raysect.core.boundingbox cimport new_boundingbox3d
+from raysect.core.boundingbox cimport new_boundingbox3d, _bbox_intersect_inline, _bbox_contains_inline
 from cpython.mem cimport PyMem_Malloc, PyMem_Realloc, PyMem_Free
 from cpython.bytes cimport PyBytes_AsString
 from libc.stdlib cimport qsort
@@ -98,6 +98,53 @@ cdef int _edge_compare(const void *p1, const void *p2) nogil:
         return -1
     else:
         return 1
+
+
+@cython.cdivision(True)
+cdef bint _kdtree_trace_node(KDTree3DCore self, int32_t id, Ray ray, double min_range, double max_range):
+
+    cdef:
+        kdnode *nodes = self._nodes
+        double *orig = &ray.origin.x
+        double *dir_val = &ray.direction.x
+        int32_t axis, lower_id, upper_id, near_id, far_id
+        double split, origin, direction, plane_distance
+
+    while nodes[id].type != LEAF:
+        axis = nodes[id].type
+        split = nodes[id].split
+        lower_id = id + 1
+        upper_id = nodes[id].count
+
+        origin = orig[axis]
+        direction = dir_val[axis]
+
+        if direction == 0.0:
+            if origin < split:
+                id = lower_id
+            else:
+                id = upper_id
+        else:
+            plane_distance = (split - origin) / direction
+
+            if origin < split or (origin == split and direction < 0.0):
+                near_id = lower_id
+                far_id = upper_id
+            else:
+                near_id = upper_id
+                far_id = lower_id
+
+            if plane_distance > max_range or plane_distance <= 0.0:
+                id = near_id
+            elif plane_distance < min_range:
+                id = far_id
+            else:
+                if _kdtree_trace_node(self, near_id, ray, min_range, plane_distance):
+                    return True
+                id = far_id
+                min_range = plane_distance
+
+    return self._trace_leaf(id, ray, max_range)
 
 
 cdef class KDTree3DCore:
@@ -503,12 +550,22 @@ cdef class KDTree3DCore:
         :return: True if the point lies inside an item, false otherwise.
         """
 
+        cdef:
+            int32_t id = ROOT_NODE
+            kdnode *nodes = self._nodes
+            double *pt = &point.x
+
         # exit early if point is not inside bounds of the kd-Tree
-        if not self.bounds.contains(point):
+        if not _bbox_contains_inline(self.bounds, point):
             return False
 
-        # start search
-        return self._is_contained_node(ROOT_NODE, point)
+        while nodes[id].type != LEAF:
+            if pt[nodes[id].type] < nodes[id].split:
+                id += 1
+            else:
+                id = nodes[id].count
+
+        return self._is_contained_leaf(id, point)
 
     cdef bint _is_contained_node(self, int32_t id, Point3D point):
         """
@@ -519,10 +576,17 @@ cdef class KDTree3DCore:
         :return: True if the point lies inside an item, false otherwise.
         """
 
-        if self._nodes[id].type == LEAF:
-            return self._is_contained_leaf(id, point)
-        else:
-            return self._is_contained_branch(id, point)
+        cdef:
+            kdnode *nodes = self._nodes
+            double *pt = &point.x
+
+        while nodes[id].type != LEAF:
+            if pt[nodes[id].type] < nodes[id].split:
+                id += 1
+            else:
+                id = nodes[id].count
+
+        return self._is_contained_leaf(id, point)
 
     cdef bint _is_contained_branch(self, int32_t id, Point3D point):
         """
@@ -599,12 +663,12 @@ cdef class KDTree3DCore:
             double min_range, max_range
 
         # check tree bounds
-        hit = self.bounds.intersect(ray, &min_range, &max_range)
+        hit = _bbox_intersect_inline(self.bounds, ray, &min_range, &max_range)
         if not hit:
             return False
 
         # start exploration of kd-Tree
-        return self._trace_node(ROOT_NODE, ray, min_range, max_range)
+        return _kdtree_trace_node(self, ROOT_NODE, ray, min_range, max_range)
 
     cdef bint _trace_node(self, int32_t id, Ray ray, double min_range, double max_range):
         """
@@ -617,10 +681,7 @@ cdef class KDTree3DCore:
         :return: True is a hit occurs, false otherwise.
         """
 
-        if self._nodes[id].type == LEAF:
-            return self._trace_leaf(id, ray, max_range)
-        else:
-            return self._trace_branch(id, ray, min_range, max_range)
+        return _kdtree_trace_node(self, id, ray, min_range, max_range)
 
     @cython.cdivision(True)
     cdef bint _trace_branch(self, int32_t id, Ray ray, double min_range, double max_range):
@@ -741,12 +802,22 @@ cdef class KDTree3DCore:
         :return: A list of ids (indices) of the items containing the point
         """
 
+        cdef:
+            int32_t id = ROOT_NODE
+            kdnode *nodes = self._nodes
+            double *pt = &point.x
+
         # exit early if point is not inside bounds of the kd-Tree
-        if not self.bounds.contains(point):
+        if not _bbox_contains_inline(self.bounds, point):
             return []
 
-        # start search
-        return self._items_containing_node(ROOT_NODE, point)
+        while nodes[id].type != LEAF:
+            if pt[nodes[id].type] < nodes[id].split:
+                id += 1
+            else:
+                id = nodes[id].count
+
+        return self._items_containing_leaf(id, point)
 
     cdef list _items_containing_node(self, int32_t id, Point3D point):
         """
@@ -757,10 +828,17 @@ cdef class KDTree3DCore:
         :return: List of items containing the point.
         """
 
-        if self._nodes[id].type == LEAF:
-            return self._items_containing_leaf(id, point)
-        else:
-            return self._items_containing_branch(id, point)
+        cdef:
+            kdnode *nodes = self._nodes
+            double *pt = &point.x
+
+        while nodes[id].type != LEAF:
+            if pt[nodes[id].type] < nodes[id].split:
+                id += 1
+            else:
+                id = nodes[id].count
+
+        return self._items_containing_leaf(id, point)
 
     cdef list _items_containing_branch(self, int32_t id, Point3D point):
         """

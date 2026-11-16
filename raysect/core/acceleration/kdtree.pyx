@@ -144,7 +144,7 @@ cdef class _PrimitiveKDTree(_KDTreeCore):
         """
 
         cdef:
-            int32_t count, item
+            int32_t count, item, index
             list enclosing_primitives
             BoundPrimitive primitive
 

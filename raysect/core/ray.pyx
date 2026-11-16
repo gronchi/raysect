@@ -34,7 +34,7 @@ from raysect.core.math cimport new_point3d
 cimport cython
 
 
-@cython.freelist(256)
+@cython.freelist(1024)
 cdef class Ray:
     """
     Describes a line in space with an origin and direction.

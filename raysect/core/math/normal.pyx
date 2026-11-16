@@ -343,6 +343,7 @@ cdef class Normal3D(_Vec3):
 
         return new_vector3d(self.x, self.y, self.z)
 
+    @cython.cdivision(True)
     cpdef Vector3D orthogonal(self):
         """
         Returns a unit vector that is guaranteed to be orthogonal to the normal.
@@ -350,21 +351,26 @@ cdef class Normal3D(_Vec3):
         :rtype: Vector3D
         """
 
-        cdef:
-            Normal3D n
-            Vector3D v
-            double m
+        cdef double t, nx, ny, nz, vx, vy, vz
 
-        n = self.normalise()
+        t = self.x * self.x + self.y * self.y + self.z * self.z
+        if t == 0.0:
+            raise ZeroDivisionError("A zero length vector can not be normalised as the direction of a zero length vector is undefined.")
+
+        t = 1.0 / sqrt(t)
+        nx = self.x * t
+        ny = self.y * t
+        nz = self.z * t
 
         # try x-axis first, if too closely aligned use the y-axis
-        v = new_vector3d(1, 0, 0)
-        if fabs(n.dot(v)) > 0.5:
-            v = new_vector3d(0, 1, 0)
+        if fabs(nx) <= 0.5:
+            vx = 1.0 - nx * nx
+            vy = -nx * ny
+            vz = -nx * nz
+        else:
+            vx = -ny * nx
+            vy = 1.0 - ny * ny
+            vz = -ny * nz
 
-        # make vector perpendicular to normal
-        m = n.dot(v)
-        v = new_vector3d(v.x - m * n.x, v.y - m * n.y, v.z - m * n.z)
-        v = v.normalise()
-
-        return v
+        t = 1.0 / sqrt(vx * vx + vy * vy + vz * vz)
+        return new_vector3d(vx * t, vy * t, vz * t)

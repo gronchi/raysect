@@ -47,7 +47,7 @@ cdef enum:
 cdef const double SPHERE_PADDING = 1.000001
 
 
-@cython.freelist(256)
+@cython.freelist(1024)
 cdef class BoundingBox3D:
     """
     Axis-aligned bounding box.
@@ -184,9 +184,9 @@ cdef class BoundingBox3D:
         back_intersection[0] = INFINITY
 
         # evaluate ray-slab intersection for x, y and z dimensions and update the intersection positions
-        self._slab(ray.origin.x, ray.direction.x, self.lower.x, self.upper.x, front_intersection, back_intersection)
-        self._slab(ray.origin.y, ray.direction.y, self.lower.y, self.upper.y, front_intersection, back_intersection)
-        self._slab(ray.origin.z, ray.direction.z, self.lower.z, self.upper.z, front_intersection, back_intersection)
+        _slab_inline(ray.origin.x, ray.direction.x, self.lower.x, self.upper.x, front_intersection, back_intersection)
+        _slab_inline(ray.origin.y, ray.direction.y, self.lower.y, self.upper.y, front_intersection, back_intersection)
+        _slab_inline(ray.origin.z, ray.direction.z, self.lower.z, self.upper.z, front_intersection, back_intersection)
 
         # does ray intersect box?
         if front_intersection[0] > back_intersection[0]:
@@ -199,50 +199,7 @@ cdef class BoundingBox3D:
 
     @cython.cdivision(True)
     cdef void _slab(self, double origin, double direction, double lower, double upper, double *front_intersection, double *back_intersection) nogil:
-
-        cdef double reciprocal, tmin, tmax
-
-        if direction != 0.0:
-
-            # calculate intersections with slab planes
-            reciprocal = 1.0 / direction
-
-            if direction > 0:
-
-                # calculate length along ray path of intersections
-                tmin = (lower - origin) * reciprocal
-                tmax = (upper - origin) * reciprocal
-
-            else:
-
-                # calculate length along ray path of intersections
-                tmin = (upper - origin) * reciprocal
-                tmax = (lower - origin) * reciprocal
-
-        else:
-
-            # ray is not propagating along this axis so limits are infinite
-            if origin < lower:
-
-                tmin = -INFINITY
-                tmax = -INFINITY
-
-            elif origin > upper:
-
-                tmin = INFINITY
-                tmax = INFINITY
-
-            else:
-
-                tmin = -INFINITY
-                tmax = INFINITY
-
-        # calculate slab intersection overlap, store closest dimension and intersected place
-        if tmin > front_intersection[0]:
-            front_intersection[0] = tmin
-
-        if tmax < back_intersection[0]:
-            back_intersection[0] = tmax
+        _slab_inline(origin, direction, lower, upper, front_intersection, back_intersection)
 
     cpdef bint contains(self, Point3D point):
         """

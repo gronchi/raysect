@@ -33,7 +33,7 @@ cimport cython
 from libc.math cimport sqrt, acos, NAN, M_PI
 
 
-@cython.freelist(512)
+@cython.freelist(1024)
 cdef class _Vec3:
     """3D Vector base class."""
 
